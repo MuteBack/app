@@ -1,0 +1,5 @@
+[env]
+SILERO_MODEL_PATH = "assets/vendor/silero_vad.onnx"
+ORT_LIB_LOCATION = "assets/vendor/onnxruntime-win-x64-1.24.2/onnxruntime-win-x64-1.24.2/lib"
+ORT_PREFER_DYNAMIC_LINK = "1"
+ORT_SKIP_DOWNLOAD = "1"

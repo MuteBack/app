@@ -1,0 +1,35 @@
+# Rust build output
+/target/
+/src-tauri/target/
+
+# Tauri generated bundles and installers
+/src-tauri/gen/
+/src-tauri/bundle/
+
+# Local model/runtime binaries are large and should be downloaded locally
+/assets/vendor/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE/editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and crash dumps
+*.log
+*.dmp
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
