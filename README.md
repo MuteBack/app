@@ -40,7 +40,13 @@ After the first build, you can also run the compiled binary directly:
 
 - `.\target\debug\muteback.exe`
 
-The local Windows setup expects the Silero model and ONNX Runtime files in [assets/vendor](C:\Users\marci\Documents\New project\assets\vendor). `run-console.bat` sets the required environment variables and PATH entries for you.
+The local Windows setup expects the Silero model, WeSpeaker speaker embedding model, and ONNX Runtime files in [assets/vendor](C:\Users\marci\Documents\New project\assets\vendor). `run-console.bat` sets the required environment variables and PATH entries for you.
+
+On a fresh checkout, download the local model/runtime assets with:
+
+- `.\download-assets.bat`
+
+The run scripts also call this downloader automatically if a required asset is missing.
 
 ## Try The MuteBack GUI
 
@@ -59,8 +65,8 @@ Current GUI status:
 - larger settings page for ducking level, smooth/instant transition, fade timings, manual restore, and voice onboarding
 - manual restore button appears in a separate always-on-top OS window when audio is currently lowered
 - optional voice onboarding flow with three local recording samples
-- onboarding currently records through the WebView, then discards raw audio and stores only sample metadata in memory
-- speaker verification is not implemented yet; voice onboarding is preparing the UI/data path
+- onboarding records short local PCM samples through the WebView, embeds them with the local WeSpeaker ECAPA ONNX model, then stores only the derived voice profile
+- optional speaker verification gates ducking session start when a voice profile is enrolled and Voice Match is enabled
 
 Current limitations:
 

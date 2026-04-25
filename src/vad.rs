@@ -1,6 +1,8 @@
 use std::convert::TryFrom;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 
 use ndarray::{Array1, Array2, Array3};
 use ort::{inputs, session::Session, value::Tensor};
@@ -65,22 +67,6 @@ impl EnergyGateVad {
         self.noise_floor
     }
 
-    fn normalized_rms(frame: &[i16]) -> f32 {
-        if frame.is_empty() {
-            return 0.0;
-        }
-
-        let sum = frame
-            .iter()
-            .map(|sample| {
-                let normalized = *sample as f32 / i16::MAX as f32;
-                normalized * normalized
-            })
-            .sum::<f32>();
-
-        (sum / frame.len() as f32).sqrt()
-    }
-
     fn adapt_noise_floor(&mut self, rms: f32) {
         let target = rms.max(self.config.minimum_noise_floor);
         self.noise_floor += (target - self.noise_floor) * self.config.adaptation_rate;
@@ -100,7 +86,7 @@ impl VadEngine for EnergyGateVad {
     }
 
     fn process_frame(&mut self, frame: &[i16]) -> VadDecision {
-        let rms = Self::normalized_rms(frame);
+        let rms = normalized_rms(frame);
 
         // This is a bootstrap detector so we can wire the rest of the product
         // before bringing in a stronger backend such as WebRTC VAD.
@@ -119,6 +105,320 @@ impl VadEngine for EnergyGateVad {
         } else {
             self.adapt_noise_floor(rms);
             VadDecision::Silence
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NearFieldGateConfig {
+    pub minimum_noise_floor: f32,
+    pub start_multiplier: f32,
+    pub continue_multiplier: f32,
+    pub minimum_start_rms: f32,
+    pub minimum_continue_rms: f32,
+    pub adaptation_rate: f32,
+    pub blocked_speech_adaptation_rate: f32,
+    pub calibration_time: Duration,
+}
+
+impl Default for NearFieldGateConfig {
+    fn default() -> Self {
+        Self {
+            minimum_noise_floor: 0.006,
+            start_multiplier: 3.2,
+            continue_multiplier: 1.7,
+            minimum_start_rms: 0.020,
+            minimum_continue_rms: 0.012,
+            adaptation_rate: 0.06,
+            blocked_speech_adaptation_rate: 0.14,
+            calibration_time: Duration::from_millis(1_200),
+        }
+    }
+}
+
+pub struct NearFieldVad<V> {
+    inner: V,
+    config: NearFieldGateConfig,
+    noise_floor: f32,
+    calibration_frames: u32,
+    calibration_frames_left: u32,
+}
+
+impl<V> NearFieldVad<V> {
+    pub fn new(inner: V, frame_duration: Duration) -> Self {
+        Self::with_config(inner, frame_duration, NearFieldGateConfig::default())
+    }
+
+    pub fn with_config(inner: V, frame_duration: Duration, config: NearFieldGateConfig) -> Self {
+        let frame_ms = frame_duration.as_millis().max(1) as u32;
+        let calibration_ms = config.calibration_time.as_millis() as u32;
+        let calibration_frames = calibration_ms.div_ceil(frame_ms);
+
+        Self {
+            inner,
+            noise_floor: config.minimum_noise_floor,
+            config,
+            calibration_frames,
+            calibration_frames_left: calibration_frames,
+        }
+    }
+
+    pub fn noise_floor(&self) -> f32 {
+        self.noise_floor
+    }
+
+    pub fn into_inner(self) -> V {
+        self.inner
+    }
+
+    fn adapt_noise_floor(&mut self, rms: f32, rate: f32) {
+        let target = rms.max(self.config.minimum_noise_floor);
+        self.noise_floor += (target - self.noise_floor) * rate.clamp(0.0, 1.0);
+        self.noise_floor = self.noise_floor.max(self.config.minimum_noise_floor);
+    }
+
+    fn passes_near_field_gate(&self, decision: VadDecision, rms: f32) -> bool {
+        let threshold = match decision {
+            VadDecision::Speech => {
+                (self.noise_floor * self.config.start_multiplier).max(self.config.minimum_start_rms)
+            }
+            VadDecision::MaybeSpeech => (self.noise_floor * self.config.continue_multiplier)
+                .max(self.config.minimum_continue_rms),
+            VadDecision::Silence => return false,
+        };
+
+        rms >= threshold
+    }
+}
+
+impl<V> VadEngine for NearFieldVad<V>
+where
+    V: VadEngine,
+{
+    fn reset(&mut self) {
+        self.inner.reset();
+        self.noise_floor = self.config.minimum_noise_floor;
+        self.calibration_frames_left = self.calibration_frames;
+    }
+
+    fn process_frame(&mut self, frame: &[i16]) -> VadDecision {
+        let rms = normalized_rms(frame);
+        let decision = self.inner.process_frame(frame);
+
+        if self.calibration_frames_left > 0 {
+            self.calibration_frames_left -= 1;
+            self.adapt_noise_floor(rms, self.config.blocked_speech_adaptation_rate);
+            return VadDecision::Silence;
+        }
+
+        match decision {
+            VadDecision::Silence => {
+                self.adapt_noise_floor(rms, self.config.adaptation_rate);
+                VadDecision::Silence
+            }
+            VadDecision::MaybeSpeech | VadDecision::Speech
+                if self.passes_near_field_gate(decision, rms) =>
+            {
+                decision
+            }
+            VadDecision::MaybeSpeech | VadDecision::Speech => {
+                self.adapt_noise_floor(rms, self.config.blocked_speech_adaptation_rate);
+                VadDecision::Silence
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReferenceAudioConfig {
+    pub minimum_reference_rms: f32,
+    pub stale_after: Duration,
+    pub initial_bleed_ratio: f32,
+    pub bleed_margin_ratio: f32,
+    pub minimum_bleed_margin_rms: f32,
+    pub loud_near_field_rms: f32,
+    pub max_learned_bleed_ratio: f32,
+    pub leak_attack_rate: f32,
+    pub leak_release_rate: f32,
+}
+
+impl Default for ReferenceAudioConfig {
+    fn default() -> Self {
+        Self {
+            minimum_reference_rms: 0.012,
+            stale_after: Duration::from_millis(250),
+            initial_bleed_ratio: 0.08,
+            bleed_margin_ratio: 0.04,
+            minimum_bleed_margin_rms: 0.006,
+            loud_near_field_rms: 0.090,
+            max_learned_bleed_ratio: 0.55,
+            leak_attack_rate: 0.18,
+            leak_release_rate: 0.015,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ReferenceAudioSnapshot {
+    pub rms: f32,
+    pub age: Duration,
+    pub learned_bleed_ratio: f32,
+}
+
+impl ReferenceAudioSnapshot {
+    pub fn is_active(&self, config: &ReferenceAudioConfig) -> bool {
+        self.rms >= config.minimum_reference_rms && self.age <= config.stale_after
+    }
+}
+
+#[derive(Debug)]
+struct ReferenceAudioState {
+    rms: f32,
+    last_update: Option<Instant>,
+    learned_bleed_ratio: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SharedReferenceAudio {
+    state: Arc<Mutex<ReferenceAudioState>>,
+}
+
+impl SharedReferenceAudio {
+    pub fn new() -> Self {
+        Self::with_config(&ReferenceAudioConfig::default())
+    }
+
+    pub fn with_config(config: &ReferenceAudioConfig) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ReferenceAudioState {
+                rms: 0.0,
+                last_update: None,
+                learned_bleed_ratio: config.initial_bleed_ratio,
+            })),
+        }
+    }
+
+    pub fn update_frame(&self, frame: &[i16]) {
+        self.update_rms(normalized_rms(frame));
+    }
+
+    pub fn update_rms(&self, rms: f32) {
+        if let Ok(mut state) = self.state.lock() {
+            let rms = rms.clamp(0.0, 1.0);
+            state.rms = state.rms.mul_add(0.75, rms * 0.25).max(rms * 0.70);
+            state.last_update = Some(Instant::now());
+        }
+    }
+
+    pub fn snapshot(&self) -> Option<ReferenceAudioSnapshot> {
+        let state = self.state.lock().ok()?;
+        let last_update = state.last_update?;
+
+        Some(ReferenceAudioSnapshot {
+            rms: state.rms,
+            age: last_update.elapsed(),
+            learned_bleed_ratio: state.learned_bleed_ratio,
+        })
+    }
+
+    fn learn_bleed_ratio(&self, reference_rms: f32, mic_rms: f32, config: &ReferenceAudioConfig) {
+        if reference_rms < config.minimum_reference_rms {
+            return;
+        }
+
+        if let Ok(mut state) = self.state.lock() {
+            let observed = (mic_rms / reference_rms).clamp(0.0, config.max_learned_bleed_ratio);
+            let rate = if observed > state.learned_bleed_ratio {
+                config.leak_attack_rate
+            } else {
+                config.leak_release_rate
+            };
+            state.learned_bleed_ratio += (observed - state.learned_bleed_ratio) * rate;
+            state.learned_bleed_ratio = state
+                .learned_bleed_ratio
+                .clamp(config.initial_bleed_ratio, config.max_learned_bleed_ratio);
+        }
+    }
+}
+
+impl Default for SharedReferenceAudio {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct ReferenceRejectingVad<V> {
+    inner: V,
+    reference: SharedReferenceAudio,
+    config: ReferenceAudioConfig,
+}
+
+impl<V> ReferenceRejectingVad<V> {
+    pub fn new(inner: V, reference: SharedReferenceAudio) -> Self {
+        Self::with_config(inner, reference, ReferenceAudioConfig::default())
+    }
+
+    pub fn with_config(
+        inner: V,
+        reference: SharedReferenceAudio,
+        config: ReferenceAudioConfig,
+    ) -> Self {
+        Self {
+            inner,
+            reference,
+            config,
+        }
+    }
+
+    pub fn into_inner(self) -> V {
+        self.inner
+    }
+
+    fn should_reject(&self, mic_rms: f32, snapshot: &ReferenceAudioSnapshot) -> bool {
+        if !snapshot.is_active(&self.config) || mic_rms >= self.config.loud_near_field_rms {
+            return false;
+        }
+
+        let bleed_margin = (snapshot.rms * self.config.bleed_margin_ratio)
+            .max(self.config.minimum_bleed_margin_rms);
+        let learned_bleed_ceiling = snapshot.rms * snapshot.learned_bleed_ratio;
+
+        mic_rms <= learned_bleed_ceiling + bleed_margin
+    }
+}
+
+impl<V> VadEngine for ReferenceRejectingVad<V>
+where
+    V: VadEngine,
+{
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn process_frame(&mut self, frame: &[i16]) -> VadDecision {
+        let decision = self.inner.process_frame(frame);
+        let Some(snapshot) = self.reference.snapshot() else {
+            return decision;
+        };
+
+        if !snapshot.is_active(&self.config) {
+            return decision;
+        }
+
+        let mic_rms = normalized_rms(frame);
+
+        if decision == VadDecision::Silence {
+            self.reference
+                .learn_bleed_ratio(snapshot.rms, mic_rms, &self.config);
+            return decision;
+        }
+
+        if self.should_reject(mic_rms, &snapshot) {
+            self.reference
+                .learn_bleed_ratio(snapshot.rms, mic_rms, &self.config);
+            VadDecision::Silence
+        } else {
+            decision
         }
     }
 }
@@ -398,4 +698,175 @@ fn default_silero_model_path() -> PathBuf {
         .join("assets")
         .join("vendor")
         .join("silero_vad.onnx")
+}
+
+fn normalized_rms(frame: &[i16]) -> f32 {
+    if frame.is_empty() {
+        return 0.0;
+    }
+
+    let sum = frame
+        .iter()
+        .map(|sample| {
+            let normalized = *sample as f32 / i16::MAX as f32;
+            normalized * normalized
+        })
+        .sum::<f32>();
+
+    (sum / frame.len() as f32).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{
+        NearFieldGateConfig, NearFieldVad, ReferenceAudioConfig, ReferenceRejectingVad,
+        SharedReferenceAudio, VadDecision, VadEngine,
+    };
+
+    struct SequenceVad {
+        decisions: Vec<VadDecision>,
+        cursor: usize,
+        resets: u32,
+    }
+
+    impl SequenceVad {
+        fn new(decisions: Vec<VadDecision>) -> Self {
+            Self {
+                decisions,
+                cursor: 0,
+                resets: 0,
+            }
+        }
+    }
+
+    impl VadEngine for SequenceVad {
+        fn reset(&mut self) {
+            self.cursor = 0;
+            self.resets += 1;
+        }
+
+        fn process_frame(&mut self, _frame: &[i16]) -> VadDecision {
+            let decision = self
+                .decisions
+                .get(self.cursor)
+                .copied()
+                .unwrap_or(VadDecision::Silence);
+            self.cursor += 1;
+            decision
+        }
+    }
+
+    fn gate_config() -> NearFieldGateConfig {
+        NearFieldGateConfig {
+            minimum_noise_floor: 0.006,
+            start_multiplier: 3.0,
+            continue_multiplier: 1.5,
+            minimum_start_rms: 0.020,
+            minimum_continue_rms: 0.010,
+            adaptation_rate: 0.10,
+            blocked_speech_adaptation_rate: 0.50,
+            calibration_time: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn near_field_gate_blocks_low_energy_speech_like_audio() {
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = NearFieldVad::with_config(inner, Duration::from_millis(32), gate_config());
+
+        let decision = vad.process_frame(&[300; 512]);
+
+        assert_eq!(decision, VadDecision::Silence);
+        assert!(vad.noise_floor() > 0.006);
+    }
+
+    #[test]
+    fn near_field_gate_allows_loud_confirmed_speech() {
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = NearFieldVad::with_config(inner, Duration::from_millis(32), gate_config());
+
+        let decision = vad.process_frame(&[1_600; 512]);
+
+        assert_eq!(decision, VadDecision::Speech);
+    }
+
+    #[test]
+    fn near_field_gate_calibrates_before_reporting_speech() {
+        let mut config = gate_config();
+        config.calibration_time = Duration::from_millis(64);
+        let inner = SequenceVad::new(vec![
+            VadDecision::Speech,
+            VadDecision::Speech,
+            VadDecision::Speech,
+        ]);
+        let mut vad = NearFieldVad::with_config(inner, Duration::from_millis(32), config);
+
+        assert_eq!(vad.process_frame(&[1_600; 512]), VadDecision::Silence);
+        assert_eq!(vad.process_frame(&[1_600; 512]), VadDecision::Silence);
+        assert_eq!(vad.process_frame(&[6_000; 512]), VadDecision::Speech);
+    }
+
+    #[test]
+    fn near_field_gate_resets_inner_vad() {
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = NearFieldVad::with_config(inner, Duration::from_millis(32), gate_config());
+
+        vad.reset();
+
+        assert_eq!(vad.into_inner().resets, 1);
+    }
+
+    fn reference_config() -> ReferenceAudioConfig {
+        ReferenceAudioConfig {
+            minimum_reference_rms: 0.010,
+            stale_after: Duration::from_secs(5),
+            initial_bleed_ratio: 0.10,
+            bleed_margin_ratio: 0.05,
+            minimum_bleed_margin_rms: 0.004,
+            loud_near_field_rms: 0.090,
+            max_learned_bleed_ratio: 0.50,
+            leak_attack_rate: 0.20,
+            leak_release_rate: 0.02,
+        }
+    }
+
+    #[test]
+    fn reference_rejecting_vad_blocks_speech_that_matches_playback_bleed() {
+        let config = reference_config();
+        let reference = SharedReferenceAudio::with_config(&config);
+        reference.update_rms(0.30);
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = ReferenceRejectingVad::with_config(inner, reference, config);
+
+        let decision = vad.process_frame(&[600; 512]);
+
+        assert_eq!(decision, VadDecision::Silence);
+    }
+
+    #[test]
+    fn reference_rejecting_vad_allows_loud_near_field_speech_over_playback() {
+        let config = reference_config();
+        let reference = SharedReferenceAudio::with_config(&config);
+        reference.update_rms(0.30);
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = ReferenceRejectingVad::with_config(inner, reference, config);
+
+        let decision = vad.process_frame(&[4_000; 512]);
+
+        assert_eq!(decision, VadDecision::Speech);
+    }
+
+    #[test]
+    fn reference_rejecting_vad_allows_speech_without_active_playback_reference() {
+        let config = reference_config();
+        let reference = SharedReferenceAudio::with_config(&config);
+        let inner = SequenceVad::new(vec![VadDecision::Speech]);
+        let mut vad = ReferenceRejectingVad::with_config(inner, reference, config);
+
+        let decision = vad.process_frame(&[600; 512]);
+
+        assert_eq!(decision, VadDecision::Speech);
+    }
 }

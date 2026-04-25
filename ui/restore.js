@@ -1,6 +1,19 @@
 const { invoke } = window.__TAURI__.core;
 
 const restoreButton = document.querySelector("#restore-sound");
+const dragRegion = document.querySelector("#restore-drag-region");
+
+dragRegion.addEventListener("pointerdown", async (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+
+  try {
+    await invoke("start_restore_prompt_drag");
+  } catch (error) {
+    console.error(error);
+  }
+});
 
 restoreButton.addEventListener("click", async () => {
   restoreButton.disabled = true;

@@ -18,8 +18,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("MuteBack console prototype");
     println!("Mode: automatic speech detection");
-    println!("Detector: Silero VAD");
-    println!("Detector path: mono -> 16 kHz resample -> Silero");
+    println!("Detector: Silero VAD + near-field guard + loopback rejection");
+    println!(
+        "Detector path: mono -> 16 kHz resample -> Silero -> near-field gate -> loopback gate"
+    );
     println!(
         "Ducking level: {:.0}% of the previous volume",
         config.normalized_ducking_level() * 100.0

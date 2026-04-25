@@ -9,12 +9,22 @@ pub struct AppConfig {
     pub ducking_level: f32,
     pub smooth_ducking: bool,
     pub manual_restore: bool,
+    pub voice_match_enabled: bool,
+    pub speaker_profile: Option<SpeakerProfile>,
     pub duck_fade: Duration,
     pub restore_fade: Duration,
     pub speech_start_confirmation: Duration,
     pub stop_candidate_window: Duration,
     pub hold_timeout: Duration,
     pub hotkey_release_grace: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeakerProfile {
+    pub embedding: Vec<f32>,
+    pub threshold: f32,
+    pub sample_rate: u32,
+    pub model_id: String,
 }
 
 impl AppConfig {
@@ -94,6 +104,8 @@ impl Default for AppConfig {
             ducking_level: 0.10,
             smooth_ducking: true,
             manual_restore: false,
+            voice_match_enabled: false,
+            speaker_profile: None,
             duck_fade: Duration::from_millis(180),
             restore_fade: Duration::from_millis(260),
             speech_start_confirmation: Duration::from_millis(220),

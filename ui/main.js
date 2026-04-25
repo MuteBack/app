@@ -32,21 +32,32 @@ const phrases = [
   "When I finish talking, I can choose when the sound comes back.",
 ];
 
+const enrollmentCapture = {
+  startThreshold: 0.018,
+  continueThreshold: 0.011,
+  minSpeechMs: 1100,
+  endSilenceMs: 850,
+  startTimeoutMs: 6000,
+  maxMs: 10000,
+};
+
 let settings = await invoke("get_settings");
 let enrollment = await invoke("get_voice_enrollment");
 let isRecording = false;
 let runtimeStatus = await invoke("get_runtime_status");
 
 function render() {
+  const enrollmentComplete = Boolean(enrollment.profile);
   controls.appEnabled.checked = settings.enabled;
   controls.level.value = settings.duckLevelPercent;
   controls.levelValue.value = `${settings.duckLevelPercent}%`;
   controls.duckFade.value = settings.duckFadeMs;
   controls.restoreFade.value = settings.restoreFadeMs;
   controls.manualRestore.checked = settings.manualRestore;
-  controls.voiceMatchEnabled.checked = settings.voiceMatchEnabled;
+  controls.voiceMatchEnabled.disabled = !enrollmentComplete;
+  controls.voiceMatchEnabled.checked = enrollmentComplete && settings.voiceMatchEnabled;
   controls.restoreModeLabel.textContent = settings.manualRestore ? "Manual" : "Automatic";
-  controls.voiceMatchLabel.textContent = settings.voiceMatchEnabled ? "On" : "Off";
+  controls.voiceMatchLabel.textContent = enrollmentComplete && settings.voiceMatchEnabled ? "On" : "Off";
   document.body.dataset.enabled = settings.enabled;
   controls.timingGrid.dataset.disabled = settings.transition === "instant";
   controls.previewFill.style.width = `${Math.max(settings.duckLevelPercent, 2)}%`;
@@ -112,9 +123,9 @@ function statusTitle(state) {
 }
 
 async function openSettings() {
+  await invoke("set_main_view", { view: "settings" });
   controls.homePage.hidden = true;
   controls.settingsPage.hidden = false;
-  await invoke("set_main_view", { view: "settings" });
 }
 
 function showHome() {
@@ -133,7 +144,7 @@ function settingsFromControls(overrides = {}) {
     duckLevelPercent: Number(controls.level.value),
     transition: settings.transition,
     manualRestore: controls.manualRestore.checked,
-    voiceMatchEnabled: controls.voiceMatchEnabled.checked,
+    voiceMatchEnabled: Boolean(enrollment.profile) && controls.voiceMatchEnabled.checked,
     duckFadeMs: Number(controls.duckFade.value),
     restoreFadeMs: Number(controls.restoreFade.value),
     ...overrides,
@@ -144,65 +155,187 @@ function renderEnrollment() {
   const sampleCount = enrollment.samples.length;
   const required = enrollment.requiredSamples;
   const currentIndex = Math.min(sampleCount, phrases.length - 1);
-  const isComplete = sampleCount >= required;
+  const isComplete = Boolean(enrollment.profile);
 
   controls.phraseStep.textContent = isComplete
     ? "Enrollment complete"
     : `Sample ${sampleCount + 1} of ${required}`;
   controls.phraseText.textContent = isComplete
-    ? "Voice enrollment is ready for a speaker verification model."
+    ? "Voice match is ready."
     : phrases[currentIndex];
-  controls.recordVoice.disabled = isRecording || isComplete || !settings.voiceMatchEnabled;
+  controls.recordVoice.disabled = isRecording || isComplete;
   controls.resetVoice.disabled = sampleCount === 0 || isRecording;
   controls.recordVoice.textContent = isRecording ? "Recording" : "Record Sample";
-  controls.voiceProgress.textContent = `${sampleCount}/${required} samples recorded`;
+  controls.voiceProgress.textContent = isComplete
+    ? `${sampleCount}/${required} samples recorded · threshold ${enrollment.profile.threshold.toFixed(2)}`
+    : `${sampleCount}/${required} samples recorded`;
 }
 
 async function recordVoiceSample() {
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
     controls.saveStatus.textContent = "Mic unsupported";
     return;
   }
 
   isRecording = true;
   renderEnrollment();
-  controls.saveStatus.textContent = "Recording";
+  controls.saveStatus.textContent = "Listening";
 
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const recorder = new MediaRecorder(stream);
   const startedAt = performance.now();
-  const chunks = [];
-
-  recorder.addEventListener("dataavailable", (event) => {
-    if (event.data.size > 0) {
-      chunks.push(event.data);
-    }
+  const captured = await capturePcmSampleUntilSilence(AudioContextClass, (status) => {
+    controls.saveStatus.textContent = status;
   });
-
-  await new Promise((resolve) => {
-    recorder.addEventListener("stop", resolve, { once: true });
-    recorder.start();
-    setTimeout(() => recorder.stop(), 2800);
-  });
-
-  for (const track of stream.getTracks()) {
-    track.stop();
-  }
-
-  const bytes = chunks.reduce((total, chunk) => total + chunk.size, 0);
   const durationMs = Math.round(performance.now() - startedAt);
 
+  controls.saveStatus.textContent = "Embedding";
   enrollment = await invoke("add_voice_sample", {
     input: {
       phraseIndex: enrollment.samples.length,
       durationMs,
-      bytes,
+      sampleRate: captured.sampleRate,
+      samples: captured.samples,
     },
   });
 
   isRecording = false;
   controls.saveStatus.textContent = "Saved";
   render();
+}
+
+async function capturePcmSampleUntilSilence(AudioContextClass, onStatus) {
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: false,
+    },
+  });
+  const audioContext = new AudioContextClass();
+  const source = audioContext.createMediaStreamSource(stream);
+  const processor = audioContext.createScriptProcessor(4096, 1, 1);
+  const monitorGain = audioContext.createGain();
+  const sampleRate = Math.round(audioContext.sampleRate);
+  const chunks = [];
+  const preSpeechChunks = [];
+  const startedAt = performance.now();
+  let speechStartedAt = null;
+  let lastSpeechAt = null;
+  let settled = false;
+  let stopTimer = null;
+
+  monitorGain.gain.value = 0;
+
+  const cleanup = async () => {
+    if (stopTimer) {
+      clearInterval(stopTimer);
+    }
+    processor.disconnect();
+    source.disconnect();
+    monitorGain.disconnect();
+    for (const track of stream.getTracks()) {
+      track.stop();
+    }
+    await audioContext.close();
+  };
+
+  processor.onaudioprocess = (event) => {
+    const now = performance.now();
+    const input = event.inputBuffer.getChannelData(0);
+    const chunk = new Float32Array(input);
+    const rms = normalizedRms(chunk);
+
+    if (!speechStartedAt) {
+      preSpeechChunks.push(chunk);
+      if (preSpeechChunks.length > 6) {
+        preSpeechChunks.shift();
+      }
+    }
+
+    if (!speechStartedAt && rms >= enrollmentCapture.startThreshold) {
+      speechStartedAt = now;
+      lastSpeechAt = now;
+      chunks.push(...preSpeechChunks);
+      preSpeechChunks.length = 0;
+      chunks.push(chunk);
+      onStatus("Recording");
+    } else if (speechStartedAt && rms >= enrollmentCapture.continueThreshold) {
+      lastSpeechAt = now;
+      chunks.push(chunk);
+    } else if (speechStartedAt) {
+      chunks.push(chunk);
+    } else if (!speechStartedAt) {
+      onStatus("Listening");
+    }
+  };
+
+  source.connect(processor);
+  processor.connect(monitorGain);
+  monitorGain.connect(audioContext.destination);
+
+  await new Promise((resolve, reject) => {
+    const stop = (callback) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      callback();
+    };
+
+    stopTimer = setInterval(() => {
+      const now = performance.now();
+      const elapsed = now - startedAt;
+
+      if (!speechStartedAt && elapsed >= enrollmentCapture.startTimeoutMs) {
+        stop(() => reject(new Error("No speech detected")));
+        return;
+      }
+
+      if (
+        speechStartedAt &&
+        now - speechStartedAt >= enrollmentCapture.minSpeechMs &&
+        lastSpeechAt &&
+        now - lastSpeechAt >= enrollmentCapture.endSilenceMs
+      ) {
+        onStatus("Finishing");
+        stop(resolve);
+        return;
+      }
+
+      if (elapsed >= enrollmentCapture.maxMs) {
+        stop(resolve);
+      }
+    }, 80);
+  }).finally(cleanup);
+
+  const totalLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const samples = new Array(totalLength);
+  let cursor = 0;
+  for (const chunk of chunks) {
+    for (const sample of chunk) {
+      samples[cursor] = sample;
+      cursor += 1;
+    }
+  }
+
+  return {
+    sampleRate,
+    samples,
+  };
+}
+
+function normalizedRms(samples) {
+  if (samples.length === 0) {
+    return 0;
+  }
+
+  let sum = 0;
+  for (const sample of samples) {
+    sum += sample * sample;
+  }
+
+  return Math.sqrt(sum / samples.length);
 }
 
 controls.openSettings.addEventListener("click", () => {
@@ -242,6 +375,10 @@ controls.manualRestore.addEventListener("change", () => {
 });
 
 controls.voiceMatchEnabled.addEventListener("change", () => {
+  if (!enrollment.profile) {
+    controls.voiceMatchEnabled.checked = false;
+    return;
+  }
   save(settingsFromControls());
 });
 
@@ -250,7 +387,8 @@ controls.recordVoice.addEventListener("click", async () => {
     await recordVoiceSample();
   } catch (error) {
     isRecording = false;
-    controls.saveStatus.textContent = "Mic error";
+    controls.saveStatus.textContent =
+      error?.message === "No speech detected" ? "No speech" : "Mic error";
     renderEnrollment();
     console.error(error);
   }

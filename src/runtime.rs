@@ -18,7 +18,13 @@ mod windows_runtime {
     use crate::ducking::{Ducker, NoopDucker};
     use crate::platform::windows::EndpointDucker;
     use crate::session::SessionAction;
-    use crate::vad::SileroVadEngine;
+    use crate::speaker::{OnnxSpeakerEmbeddingEngine, SpeakerVerifiedVad};
+    use crate::vad::{NearFieldVad, ReferenceRejectingVad, SharedReferenceAudio, SileroVadEngine};
+
+    type RuntimeVad = SpeakerVerifiedVad<
+        ReferenceRejectingVad<NearFieldVad<SileroVadEngine>>,
+        OnnxSpeakerEmbeddingEngine,
+    >;
 
     #[derive(Debug, Clone)]
     pub struct RuntimeInfo {
@@ -140,11 +146,58 @@ mod windows_runtime {
 
         let (frame_tx, frame_rx) = mpsc::sync_channel::<FrameMessage>(12);
         let (error_tx, error_rx) = mpsc::channel::<String>();
-        let stream = build_input_stream(input_device, input_config.clone(), frame_tx, error_tx)?;
+        let stream = build_input_stream(
+            input_device,
+            input_config.clone(),
+            frame_tx,
+            error_tx.clone(),
+        )?;
         stream.play()?;
 
-        let vad = SileroVadEngine::new(detector_sample_rate)
+        let reference_audio = SharedReferenceAudio::new();
+        let reference_stream =
+            match build_reference_stream(&host, reference_audio.clone(), error_tx.clone()) {
+                Ok(Some(stream)) => match stream.play() {
+                    Ok(()) => Some(stream),
+                    Err(error) => {
+                        let _ = event_tx.send(RuntimeEvent::Warning(format!(
+                            "reference audio unavailable; loopback rejection is disabled: {error}"
+                        )));
+                        None
+                    }
+                },
+                Ok(None) => {
+                    let _ = event_tx.send(RuntimeEvent::Warning(
+                        "reference audio unavailable; loopback rejection is disabled".to_string(),
+                    ));
+                    None
+                }
+                Err(error) => {
+                    let _ = event_tx.send(RuntimeEvent::Warning(format!(
+                        "reference audio unavailable; loopback rejection is disabled: {error}"
+                    )));
+                    None
+                }
+            };
+
+        let silero = SileroVadEngine::new(detector_sample_rate)
             .map_err(|error| RuntimeError::new(format!("failed to start Silero VAD: {error}")))?;
+        let near_field = NearFieldVad::new(silero, Duration::from_millis(32));
+        let reference_rejecting = ReferenceRejectingVad::new(near_field, reference_audio);
+        let speaker_engine = match OnnxSpeakerEmbeddingEngine::new() {
+            Ok(engine) => Some(engine),
+            Err(error) => {
+                let _ = event_tx.send(RuntimeEvent::Warning(format!(
+                    "speaker verification unavailable: {error}"
+                )));
+                None
+            }
+        };
+        let vad = SpeakerVerifiedVad::new(
+            reference_rejecting,
+            speaker_engine,
+            active_speaker_profile(&initial_config),
+        );
         let mut resampler = StreamingLinearResampler::new(input_sample_rate, detector_sample_rate);
         let mut detector_frames = MonoFrameAccumulator::new(detector_sample_rate, 1, 32);
         let mut app = MuteBackApp::new(initial_config.clone(), vad, NoopDucker::default());
@@ -201,13 +254,14 @@ mod windows_runtime {
         }
 
         ducker.restore()?;
+        drop(reference_stream);
         drop(stream);
         Ok(())
     }
 
     fn handle_commands(
         command_rx: &mpsc::Receiver<RuntimeCommand>,
-        app: &mut MuteBackApp<SileroVadEngine, NoopDucker>,
+        app: &mut MuteBackApp<RuntimeVad, NoopDucker>,
         ducker: &mut EndpointDucker,
         config: &mut AppConfig,
         event_tx: &mpsc::Sender<RuntimeEvent>,
@@ -216,6 +270,8 @@ mod windows_runtime {
             match command {
                 RuntimeCommand::UpdateConfig(next_config) => {
                     *config = next_config.clone();
+                    app.vad_mut()
+                        .set_profile(active_speaker_profile(&next_config));
                     app.set_config(next_config);
                 }
                 RuntimeCommand::Restore => {
@@ -264,6 +320,13 @@ mod windows_runtime {
         Ok(())
     }
 
+    fn active_speaker_profile(config: &AppConfig) -> Option<crate::config::SpeakerProfile> {
+        config
+            .voice_match_enabled
+            .then(|| config.speaker_profile.clone())
+            .flatten()
+    }
+
     fn select_detector_input_config(
         device: &cpal::Device,
     ) -> Result<SupportedStreamConfig, Box<dyn Error>> {
@@ -293,6 +356,19 @@ mod windows_runtime {
         } else {
             None
         }
+    }
+
+    fn build_reference_stream(
+        host: &cpal::Host,
+        reference: SharedReferenceAudio,
+        error_tx: mpsc::Sender<String>,
+    ) -> Result<Option<Stream>, Box<dyn Error>> {
+        let Some(output_device) = host.default_output_device() else {
+            return Ok(None);
+        };
+
+        let output_config = output_device.default_output_config()?;
+        build_reference_input_stream(output_device, output_config, reference, error_tx).map(Some)
     }
 
     #[derive(Debug)]
@@ -408,6 +484,114 @@ mod windows_runtime {
         Ok(stream)
     }
 
+    fn build_reference_input_stream(
+        device: cpal::Device,
+        supported_config: SupportedStreamConfig,
+        reference: SharedReferenceAudio,
+        error_tx: mpsc::Sender<String>,
+    ) -> Result<Stream, Box<dyn Error>> {
+        let sample_rate = supported_config.sample_rate().0;
+        let channels = supported_config.channels() as usize;
+        let config = supported_config.config();
+        let sample_format = supported_config.sample_format();
+
+        let stream = match sample_format {
+            SampleFormat::I8 => build_typed_reference_stream::<i8>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::I16 => build_typed_reference_stream::<i16>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::I24 => build_typed_reference_stream::<I24>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::I32 => build_typed_reference_stream::<i32>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::I64 => build_typed_reference_stream::<i64>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::U8 => build_typed_reference_stream::<u8>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::U16 => build_typed_reference_stream::<u16>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::U32 => build_typed_reference_stream::<u32>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::U64 => build_typed_reference_stream::<u64>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::F32 => build_typed_reference_stream::<f32>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            SampleFormat::F64 => build_typed_reference_stream::<f64>(
+                &device,
+                &config,
+                sample_rate,
+                channels,
+                reference,
+                error_tx,
+            )?,
+            other => {
+                return Err(format!("unsupported reference sample format: {other:?}").into());
+            }
+        };
+
+        Ok(stream)
+    }
+
     fn build_typed_input_stream<T>(
         device: &cpal::Device,
         config: &cpal::StreamConfig,
@@ -436,6 +620,39 @@ mod windows_runtime {
             },
             move |error| {
                 let _ = err_tx.send(format!("stream error: {error}"));
+            },
+            None,
+        )
+    }
+
+    fn build_typed_reference_stream<T>(
+        device: &cpal::Device,
+        config: &cpal::StreamConfig,
+        sample_rate: u32,
+        channels: usize,
+        reference: SharedReferenceAudio,
+        error_tx: mpsc::Sender<String>,
+    ) -> Result<Stream, cpal::BuildStreamError>
+    where
+        T: SizedSample,
+        i16: FromSample<T>,
+    {
+        let err_tx = error_tx.clone();
+        let mut accumulator = MonoFrameAccumulator::new(sample_rate, channels, 20);
+
+        device.build_input_stream(
+            config,
+            move |data: &[T], _| {
+                accumulator.push(
+                    data,
+                    |sample| i16::from_sample(sample),
+                    |frame, _elapsed| {
+                        reference.update_frame(frame);
+                    },
+                );
+            },
+            move |error| {
+                let _ = err_tx.send(format!("reference audio stream error: {error}"));
             },
             None,
         )

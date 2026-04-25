@@ -88,6 +88,10 @@ where
         self.controller.set_config(config);
     }
 
+    pub fn vad_mut(&mut self) -> &mut V {
+        &mut self.vad
+    }
+
     pub fn refresh_audio_backend(&mut self) -> Result<(), DuckError> {
         self.ducker.refresh()
     }

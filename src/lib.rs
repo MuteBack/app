@@ -12,4 +12,6 @@ pub mod runtime;
 #[cfg(feature = "engine")]
 pub mod session;
 #[cfg(feature = "engine")]
+pub mod speaker;
+#[cfg(feature = "engine")]
 pub mod vad;

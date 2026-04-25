@@ -13,9 +13,9 @@
         "label": "main",
         "title": "MuteBack",
         "width": 360,
-        "height": 260,
+        "height": 290,
         "minWidth": 360,
-        "minHeight": 260,
+        "minHeight": 290,
         "resizable": false,
         "fullscreen": false
       }

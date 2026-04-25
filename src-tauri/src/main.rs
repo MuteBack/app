@@ -1,8 +1,14 @@
+use std::fs;
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
-use muteback::config::AppConfig;
+use muteback::config::{AppConfig, SpeakerProfile};
 use muteback::runtime::{RuntimeEvent, RuntimeHandle};
+use muteback::speaker::{
+    build_voice_profile, resample_f32_to_i16, OnnxSpeakerEmbeddingEngine, SpeakerEmbeddingEngine,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -12,10 +18,13 @@ use tauri::{
 };
 
 const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/tray.png");
-const MAIN_HOME_SIZE: (f64, f64) = (360.0, 260.0);
+const MAIN_HOME_SIZE: (f64, f64) = (360.0, 290.0);
 const MAIN_SETTINGS_SIZE: (f64, f64) = (620.0, 720.0);
+const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (500.0, 520.0);
 const RESTORE_WINDOW_LABEL: &str = "restore_prompt";
-const RESTORE_WINDOW_SIZE: (f64, f64) = (220.0, 72.0);
+const RESTORE_WINDOW_SIZE: (f64, f64) = (196.0, 86.0);
+const MAIN_RESIZE_STEPS: u32 = 14;
+const MAIN_RESIZE_FRAME_MS: u64 = 12;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +70,8 @@ impl Default for Settings {
 struct VoiceSampleInput {
     phrase_index: u8,
     duration_ms: u64,
-    bytes: u64,
+    sample_rate: u32,
+    samples: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -70,6 +80,16 @@ struct VoiceSample {
     phrase_index: u8,
     duration_ms: u64,
     bytes: u64,
+    #[serde(skip)]
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceProfileSummary {
+    model_id: String,
+    threshold: f32,
+    sample_count: u8,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -77,6 +97,9 @@ struct VoiceSample {
 struct VoiceEnrollment {
     required_samples: u8,
     samples: Vec<VoiceSample>,
+    profile: Option<VoiceProfileSummary>,
+    #[serde(skip)]
+    speaker_profile: Option<SpeakerProfile>,
 }
 
 impl Default for VoiceEnrollment {
@@ -84,14 +107,27 @@ impl Default for VoiceEnrollment {
         Self {
             required_samples: 3,
             samples: Vec::new(),
+            profile: None,
+            speaker_profile: None,
         }
     }
 }
 
 impl VoiceEnrollment {
     fn is_complete(&self) -> bool {
-        self.samples.len() >= self.required_samples as usize
+        self.samples.len() >= self.required_samples as usize && self.speaker_profile.is_some()
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredVoiceProfile {
+    required_samples: u8,
+    samples: Vec<VoiceSample>,
+    embedding: Vec<f32>,
+    threshold: f32,
+    sample_rate: u32,
+    model_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -174,38 +210,90 @@ fn get_voice_enrollment(state: tauri::State<'_, AppState>) -> Result<VoiceEnroll
 #[tauri::command]
 fn add_voice_sample(
     input: VoiceSampleInput,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<VoiceEnrollment, String> {
     if input.duration_ms < 500 {
         return Err("voice sample is too short".to_string());
     }
 
-    let mut enrollment = state
-        .voice_enrollment
-        .lock()
-        .map_err(|_| "voice enrollment state is unavailable".to_string())?;
-
-    if enrollment.is_complete() {
-        return Ok(enrollment.clone());
+    if input.samples.len() < input.sample_rate as usize / 2 {
+        return Err("voice sample has too little audio".to_string());
     }
 
-    enrollment.samples.push(VoiceSample {
-        phrase_index: input.phrase_index,
-        duration_ms: input.duration_ms,
-        bytes: input.bytes,
-    });
+    let pcm = resample_f32_to_i16(&input.samples, input.sample_rate, 16_000);
+    let mut embedder = OnnxSpeakerEmbeddingEngine::new().map_err(|error| error.to_string())?;
+    let embedding = embedder.embed(&pcm).map_err(|error| error.to_string())?;
+    let bytes = input.samples.len() as u64 * std::mem::size_of::<f32>() as u64;
 
-    Ok(enrollment.clone())
+    let result = {
+        let mut enrollment = state
+            .voice_enrollment
+            .lock()
+            .map_err(|_| "voice enrollment state is unavailable".to_string())?;
+
+        if enrollment.is_complete() {
+            return Ok(enrollment.clone());
+        }
+
+        enrollment.samples.push(VoiceSample {
+            phrase_index: input.phrase_index,
+            duration_ms: input.duration_ms,
+            bytes,
+            embedding,
+        });
+
+        if enrollment.samples.len() >= enrollment.required_samples as usize {
+            let embeddings = enrollment
+                .samples
+                .iter()
+                .map(|sample| sample.embedding.clone())
+                .collect::<Vec<_>>();
+            let profile = build_voice_profile(&embeddings).map_err(|error| error.to_string())?;
+            enrollment.profile = Some(VoiceProfileSummary {
+                model_id: profile.model_id.clone(),
+                threshold: profile.threshold,
+                sample_count: enrollment.samples.len() as u8,
+            });
+            enrollment.speaker_profile = Some(profile);
+            persist_voice_profile(&app, &enrollment)?;
+        }
+
+        enrollment.clone()
+    };
+
+    let settings = state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "settings state is unavailable".to_string())?;
+    sync_runtime(&settings, &state, &app)?;
+
+    Ok(result)
 }
 
 #[tauri::command]
-fn reset_voice_enrollment(state: tauri::State<'_, AppState>) -> Result<VoiceEnrollment, String> {
+fn reset_voice_enrollment(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceEnrollment, String> {
     let mut enrollment = state
         .voice_enrollment
         .lock()
         .map_err(|_| "voice enrollment state is unavailable".to_string())?;
     *enrollment = VoiceEnrollment::default();
-    Ok(enrollment.clone())
+    let result = enrollment.clone();
+    drop(enrollment);
+
+    delete_voice_profile(&app)?;
+    let settings = state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "settings state is unavailable".to_string())?;
+    sync_runtime(&settings, &state, &app)?;
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -244,6 +332,15 @@ fn set_restore_prompt_visible(app: AppHandle, visible: bool) -> Result<(), Strin
     set_restore_prompt_visible_inner(&app, visible)
 }
 
+#[tauri::command]
+fn start_restore_prompt_drag(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != RESTORE_WINDOW_LABEL {
+        return Ok(());
+    }
+
+    window.start_dragging().map_err(|error| error.to_string())
+}
+
 fn validate_settings(settings: &Settings) -> Result<(), String> {
     if settings.duck_level_percent > 100 {
         return Err("ducking level must be between 0 and 100".to_string());
@@ -273,7 +370,7 @@ fn start_or_update_runtime(
     state: &AppState,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let config = app_config_from_settings(settings);
+    let config = app_config_from_settings(settings, state);
     let mut runtime = state
         .runtime
         .lock()
@@ -384,14 +481,96 @@ fn watch_runtime_events(
     });
 }
 
-fn app_config_from_settings(settings: &Settings) -> AppConfig {
+fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig {
     let mut config = AppConfig::default();
     config.ducking_level = settings.duck_level_percent as f32 / 100.0;
     config.smooth_ducking = settings.transition == TransitionMode::Smooth;
     config.manual_restore = settings.manual_restore;
+    config.voice_match_enabled = settings.voice_match_enabled;
+    config.speaker_profile = if settings.voice_match_enabled {
+        state
+            .voice_enrollment
+            .lock()
+            .ok()
+            .and_then(|enrollment| enrollment.speaker_profile.clone())
+    } else {
+        None
+    };
     config.duck_fade = std::time::Duration::from_millis(settings.duck_fade_ms);
     config.restore_fade = std::time::Duration::from_millis(settings.restore_fade_ms);
     config
+}
+
+fn load_voice_profile(app: &AppHandle) -> Result<Option<VoiceEnrollment>, String> {
+    let path = voice_profile_path(app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read voice profile: {error}"))?;
+    let stored = serde_json::from_str::<StoredVoiceProfile>(&contents)
+        .map_err(|error| format!("failed to parse voice profile: {error}"))?;
+    let speaker_profile = SpeakerProfile {
+        embedding: stored.embedding,
+        threshold: stored.threshold,
+        sample_rate: stored.sample_rate,
+        model_id: stored.model_id.clone(),
+    };
+    let profile = Some(VoiceProfileSummary {
+        model_id: stored.model_id,
+        threshold: stored.threshold,
+        sample_count: stored.samples.len() as u8,
+    });
+
+    Ok(Some(VoiceEnrollment {
+        required_samples: stored.required_samples,
+        samples: stored.samples,
+        profile,
+        speaker_profile: Some(speaker_profile),
+    }))
+}
+
+fn persist_voice_profile(app: &AppHandle, enrollment: &VoiceEnrollment) -> Result<(), String> {
+    let Some(profile) = enrollment.speaker_profile.as_ref() else {
+        return Ok(());
+    };
+
+    let path = voice_profile_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create voice profile directory: {error}"))?;
+    }
+
+    let stored = StoredVoiceProfile {
+        required_samples: enrollment.required_samples,
+        samples: enrollment.samples.clone(),
+        embedding: profile.embedding.clone(),
+        threshold: profile.threshold,
+        sample_rate: profile.sample_rate,
+        model_id: profile.model_id.clone(),
+    };
+    let contents = serde_json::to_string_pretty(&stored)
+        .map_err(|error| format!("failed to encode voice profile: {error}"))?;
+
+    fs::write(path, contents).map_err(|error| format!("failed to save voice profile: {error}"))
+}
+
+fn delete_voice_profile(app: &AppHandle) -> Result<(), String> {
+    let path = voice_profile_path(app)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| format!("failed to delete voice profile: {error}"))?;
+    }
+
+    Ok(())
+}
+
+fn voice_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to locate app data directory: {error}"))?
+        .join("voice-profile.json"))
 }
 
 fn update_runtime_message(state: &AppState, message: &str) {
@@ -411,20 +590,68 @@ fn resize_main_window(
     size: (f64, f64),
     resizable: bool,
 ) -> Result<(), String> {
-    let logical_size = LogicalSize::new(size.0, size.1);
+    window
+        .set_resizable(true)
+        .map_err(|error| error.to_string())?;
+    window
+        .set_min_size(Some(LogicalSize::new(MAIN_HOME_SIZE.0, MAIN_HOME_SIZE.1)))
+        .map_err(|error| error.to_string())?;
 
+    animate_main_window_size(window, size)?;
+
+    let min_size = if resizable {
+        MAIN_SETTINGS_MIN_SIZE
+    } else {
+        size
+    };
+    window
+        .set_min_size(Some(LogicalSize::new(min_size.0, min_size.1)))
+        .map_err(|error| error.to_string())?;
     window
         .set_resizable(resizable)
         .map_err(|error| error.to_string())?;
+
+    Ok(())
+}
+
+fn animate_main_window_size(window: &WebviewWindow, target: (f64, f64)) -> Result<(), String> {
+    let current = current_logical_window_size(window)?;
+
+    for step in 1..=MAIN_RESIZE_STEPS {
+        let progress = step as f64 / MAIN_RESIZE_STEPS as f64;
+        let eased = ease_in_out(progress);
+        let width = interpolate(current.0, target.0, eased);
+        let height = interpolate(current.1, target.1, eased);
+
+        window
+            .set_size(LogicalSize::new(width, height))
+            .map_err(|error| error.to_string())?;
+        window.center().map_err(|error| error.to_string())?;
+        thread::sleep(Duration::from_millis(MAIN_RESIZE_FRAME_MS));
+    }
+
     window
-        .set_min_size(Some(logical_size))
-        .map_err(|error| error.to_string())?;
-    window
-        .set_size(logical_size)
+        .set_size(LogicalSize::new(target.0, target.1))
         .map_err(|error| error.to_string())?;
     window.center().map_err(|error| error.to_string())?;
 
     Ok(())
+}
+
+fn current_logical_window_size(window: &WebviewWindow) -> Result<(f64, f64), String> {
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let size = window.inner_size().map_err(|error| error.to_string())?;
+
+    Ok((size.width as f64 / scale, size.height as f64 / scale))
+}
+
+fn interpolate(start: f64, end: f64, progress: f64) -> f64 {
+    start + (end - start) * progress
+}
+
+fn ease_in_out(progress: f64) -> f64 {
+    let clamped = progress.clamp(0.0, 1.0);
+    clamped * clamped * (3.0 - 2.0 * clamped)
 }
 
 fn update_restore_prompt(app: &AppHandle, state: &AppState) -> Result<(), String> {
@@ -454,7 +681,6 @@ fn set_restore_prompt_visible_inner(app: &AppHandle, visible: bool) -> Result<()
     };
 
     if visible {
-        position_restore_window(&window).map_err(|error| error.to_string())?;
         window
             .set_always_on_top(true)
             .map_err(|error| error.to_string())?;
@@ -505,6 +731,7 @@ fn create_restore_window(app: &mut tauri::App) -> tauri::Result<()> {
     .max_inner_size(RESTORE_WINDOW_SIZE.0, RESTORE_WINDOW_SIZE.1)
     .resizable(false)
     .decorations(false)
+    .transparent(true)
     .always_on_top(true)
     .skip_taskbar(true)
     .visible(false)
@@ -561,12 +788,20 @@ fn main() {
             reset_voice_enrollment,
             request_restore,
             set_main_view,
-            set_restore_prompt_visible
+            set_restore_prompt_visible,
+            start_restore_prompt_drag
         ])
         .setup(|app| {
             create_tray(app)?;
             create_restore_window(app)?;
             let state = app.state::<AppState>();
+            if let Some(enrollment) = load_voice_profile(app.handle())? {
+                let mut voice_enrollment = state
+                    .voice_enrollment
+                    .lock()
+                    .map_err(|_| "voice enrollment state is unavailable")?;
+                *voice_enrollment = enrollment;
+            }
             let settings = state
                 .settings
                 .lock()

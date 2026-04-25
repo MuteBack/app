@@ -159,9 +159,55 @@ h3 {
 .power-control input,
 .toggle-row input,
 .switch input {
-  width: 24px;
-  height: 24px;
-  accent-color: #417a59;
+  position: relative;
+  width: 50px;
+  height: 28px;
+  flex: 0 0 auto;
+  appearance: none;
+  border: 1px solid #c7d0c6;
+  border-radius: 999px;
+  background: #e3e8e1;
+  cursor: pointer;
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.power-control input::before,
+.toggle-row input::before,
+.switch input::before {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(34, 41, 37, 0.18);
+  content: "";
+  transition: transform 180ms ease;
+}
+
+.power-control input:checked,
+.toggle-row input:checked,
+.switch input:checked {
+  border-color: #417a59;
+  background: #417a59;
+  box-shadow: 0 0 0 5px rgba(65, 122, 89, 0.12);
+}
+
+.power-control input:checked::before,
+.toggle-row input:checked::before,
+.switch input:checked::before {
+  transform: translateX(22px);
+}
+
+.power-control input:focus-visible,
+.toggle-row input:focus-visible,
+.switch input:focus-visible {
+  outline: 2px solid rgba(65, 122, 89, 0.32);
+  outline-offset: 3px;
 }
 
 .settings-link,
@@ -185,7 +231,33 @@ h3 {
   display: grid;
   grid-template-rows: auto auto auto auto 1fr auto;
   gap: 12px;
+  overflow-x: hidden;
+  overflow-y: scroll;
   padding: 20px;
+  padding-right: 14px;
+  scrollbar-color: rgba(82, 99, 89, 0.34) transparent;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.settings-page::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-page::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-page::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(82, 99, 89, 0.26);
+  background-clip: content-box;
+}
+
+.settings-page::-webkit-scrollbar-thumb:hover {
+  background: rgba(82, 99, 89, 0.42);
+  background-clip: content-box;
 }
 
 .settings-page[hidden],
@@ -358,21 +430,66 @@ label input[type="number"] {
 
 .restore-window {
   display: grid;
+  grid-template-rows: auto auto;
+  gap: 7px;
   width: 100%;
   height: 100%;
-  place-items: center;
-  padding: 10px;
-  background: #202426;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent),
+    #202426;
+  box-shadow: 0 16px 38px rgba(20, 24, 22, 0.26);
+}
+
+.restore-drag-region {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 18px;
+  color: rgba(247, 250, 246, 0.72);
+  cursor: grab;
+  font-size: 0.72rem;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.restore-drag-region:active {
+  cursor: grabbing;
+}
+
+.restore-drag-region i {
+  width: 28px;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(247, 250, 246, 0.28);
 }
 
 .restore-window-button {
   width: 100%;
-  height: 100%;
+  min-height: 36px;
   border: 0;
-  border-radius: 12px;
-  background: #f6f8f4;
-  color: #202426;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #f7faf6, #dfe7dc);
+  color: #1f2a24;
   cursor: pointer;
   font-weight: 800;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.015em;
+  box-shadow: 0 7px 18px rgba(0, 0, 0, 0.2);
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.restore-window-button:hover {
+  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.24);
+  transform: translateY(-1px);
+}
+
+.restore-window-button:active {
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.2);
+  transform: translateY(0);
 }
