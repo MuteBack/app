@@ -35,6 +35,13 @@ mod windows_runtime {
     }
 
     #[derive(Debug, Clone)]
+    pub struct AudioInputDevice {
+        pub id: String,
+        pub name: String,
+        pub is_default: bool,
+    }
+
+    #[derive(Debug, Clone)]
     pub enum RuntimeEvent {
         Started(RuntimeInfo),
         Ducked,
@@ -60,6 +67,25 @@ mod windows_runtime {
     }
 
     impl Error for RuntimeError {}
+
+    pub fn list_input_devices() -> Result<Vec<AudioInputDevice>, RuntimeError> {
+        let host = cpal::default_host();
+        let default_name = host
+            .default_input_device()
+            .and_then(|device| device.name().ok());
+        let devices = host
+            .input_devices()
+            .map_err(|error| RuntimeError::new(format!("failed to list microphones: {error}")))?
+            .filter_map(|device| device.name().ok())
+            .map(|name| AudioInputDevice {
+                id: name.clone(),
+                is_default: default_name.as_deref() == Some(name.as_str()),
+                name,
+            })
+            .collect::<Vec<_>>();
+
+        Ok(devices)
+    }
 
     enum RuntimeCommand {
         UpdateConfig(AppConfig),
@@ -134,9 +160,7 @@ mod windows_runtime {
         event_tx: &mpsc::Sender<RuntimeEvent>,
     ) -> Result<(), Box<dyn Error>> {
         let host = cpal::default_host();
-        let input_device = host
-            .default_input_device()
-            .ok_or_else(|| RuntimeError::new("no default input device found"))?;
+        let input_device = select_input_device(&host, &initial_config, event_tx)?;
         let input_config = select_detector_input_config(&input_device)?;
         let input_sample_rate = input_config.sample_rate().0;
         let detector_sample_rate = 16_000;
@@ -325,6 +349,39 @@ mod windows_runtime {
             .voice_match_enabled
             .then(|| config.speaker_profile.clone())
             .flatten()
+    }
+
+    fn select_input_device(
+        host: &cpal::Host,
+        config: &AppConfig,
+        event_tx: &mpsc::Sender<RuntimeEvent>,
+    ) -> Result<cpal::Device, RuntimeError> {
+        if let Some(preferred_name) = config
+            .microphone_name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        {
+            match host.input_devices() {
+                Ok(devices) => {
+                    for device in devices {
+                        if device.name().ok().as_deref() == Some(preferred_name) {
+                            return Ok(device);
+                        }
+                    }
+                    let _ = event_tx.send(RuntimeEvent::Warning(format!(
+                        "selected microphone not found, using default: {preferred_name}"
+                    )));
+                }
+                Err(error) => {
+                    let _ = event_tx.send(RuntimeEvent::Warning(format!(
+                        "failed to inspect microphones, using default: {error}"
+                    )));
+                }
+            }
+        }
+
+        host.default_input_device()
+            .ok_or_else(|| RuntimeError::new("no default input device found"))
     }
 
     fn select_detector_input_config(
@@ -714,6 +771,10 @@ mod unsupported_runtime {
     }
 
     impl Error for RuntimeError {}
+
+    pub fn list_input_devices() -> Result<Vec<AudioInputDevice>, RuntimeError> {
+        Ok(Vec::new())
+    }
 
     pub struct RuntimeHandle;
 

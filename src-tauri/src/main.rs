@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use muteback::config::{AppConfig, SpeakerProfile};
-use muteback::runtime::{RuntimeEvent, RuntimeHandle};
+use muteback::runtime::{list_input_devices, RuntimeEvent, RuntimeHandle};
 use muteback::speaker::{
     build_voice_profile, resample_f32_to_i16, OnnxSpeakerEmbeddingEngine, SpeakerEmbeddingEngine,
 };
@@ -34,13 +34,14 @@ enum TransitionMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 struct Settings {
     enabled: bool,
     duck_level_percent: u8,
     transition: TransitionMode,
     manual_restore: bool,
     voice_match_enabled: bool,
+    microphone_id: Option<String>,
     duck_fade_ms: u64,
     restore_fade_ms: u64,
 }
@@ -59,10 +60,19 @@ impl Default for Settings {
             },
             manual_restore: config.manual_restore,
             voice_match_enabled: false,
+            microphone_id: None,
             duck_fade_ms: config.duck_fade.as_millis() as u64,
             restore_fade_ms: config.restore_fade.as_millis() as u64,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MicrophoneOption {
+    id: String,
+    name: String,
+    is_default: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,17 +186,36 @@ fn update_settings(
 ) -> Result<Settings, String> {
     validate_settings(&input)?;
 
-    {
+    let restart_runtime = {
         let mut settings = state
             .settings
             .lock()
             .map_err(|_| "settings state is unavailable".to_string())?;
+        let restart_runtime = settings.microphone_id != input.microphone_id;
         *settings = input.clone();
-    }
+        restart_runtime
+    };
 
-    sync_runtime(&input, &state, &app)?;
+    persist_settings(&app, &input)?;
+    sync_runtime(&input, &state, &app, restart_runtime)?;
     update_restore_prompt(&app, &state)?;
     Ok(input)
+}
+
+#[tauri::command]
+fn list_microphones() -> Result<Vec<MicrophoneOption>, String> {
+    list_input_devices()
+        .map_err(|error| error.to_string())
+        .map(|devices| {
+            devices
+                .into_iter()
+                .map(|device| MicrophoneOption {
+                    id: device.id,
+                    name: device.name,
+                    is_default: device.is_default,
+                })
+                .collect()
+        })
 }
 
 #[tauri::command]
@@ -267,7 +296,7 @@ fn add_voice_sample(
         .lock()
         .map(|settings| settings.clone())
         .map_err(|_| "settings state is unavailable".to_string())?;
-    sync_runtime(&settings, &state, &app)?;
+    sync_runtime(&settings, &state, &app, false)?;
 
     Ok(result)
 }
@@ -291,7 +320,7 @@ fn reset_voice_enrollment(
         .lock()
         .map(|settings| settings.clone())
         .map_err(|_| "settings state is unavailable".to_string())?;
-    sync_runtime(&settings, &state, &app)?;
+    sync_runtime(&settings, &state, &app, false)?;
 
     Ok(result)
 }
@@ -349,7 +378,16 @@ fn validate_settings(settings: &Settings) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_runtime(settings: &Settings, state: &AppState, app: &AppHandle) -> Result<(), String> {
+fn sync_runtime(
+    settings: &Settings,
+    state: &AppState,
+    app: &AppHandle,
+    restart_runtime: bool,
+) -> Result<(), String> {
+    if restart_runtime {
+        stop_runtime(state);
+    }
+
     if settings.enabled {
         start_or_update_runtime(settings, state, app)
     } else {
@@ -487,6 +525,7 @@ fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig 
     config.smooth_ducking = settings.transition == TransitionMode::Smooth;
     config.manual_restore = settings.manual_restore;
     config.voice_match_enabled = settings.voice_match_enabled;
+    config.microphone_name = settings.microphone_id.clone();
     config.speaker_profile = if settings.voice_match_enabled {
         state
             .voice_enrollment
@@ -499,6 +538,39 @@ fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig 
     config.duck_fade = std::time::Duration::from_millis(settings.duck_fade_ms);
     config.restore_fade = std::time::Duration::from_millis(settings.restore_fade_ms);
     config
+}
+
+fn load_settings(app: &AppHandle) -> Result<Option<Settings>, String> {
+    let path = settings_path(app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let contents =
+        fs::read_to_string(&path).map_err(|error| format!("failed to read settings: {error}"))?;
+    serde_json::from_str::<Settings>(&contents)
+        .map(Some)
+        .map_err(|error| format!("failed to parse settings: {error}"))
+}
+
+fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let path = settings_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create settings directory: {error}"))?;
+    }
+
+    let contents = serde_json::to_string_pretty(settings)
+        .map_err(|error| format!("failed to encode settings: {error}"))?;
+    fs::write(path, contents).map_err(|error| format!("failed to save settings: {error}"))
+}
+
+fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to locate app data directory: {error}"))?
+        .join("settings.json"))
 }
 
 fn load_voice_profile(app: &AppHandle) -> Result<Option<VoiceEnrollment>, String> {
@@ -782,6 +854,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
+            list_microphones,
             get_runtime_status,
             get_voice_enrollment,
             add_voice_sample,
@@ -795,6 +868,13 @@ fn main() {
             create_tray(app)?;
             create_restore_window(app)?;
             let state = app.state::<AppState>();
+            if let Some(settings) = load_settings(app.handle())? {
+                let mut saved_settings = state
+                    .settings
+                    .lock()
+                    .map_err(|_| "settings state is unavailable")?;
+                *saved_settings = settings;
+            }
             if let Some(enrollment) = load_voice_profile(app.handle())? {
                 let mut voice_enrollment = state
                     .voice_enrollment
@@ -807,7 +887,7 @@ fn main() {
                 .lock()
                 .map(|settings| settings.clone())
                 .map_err(|_| "settings state is unavailable")?;
-            sync_runtime(&settings, &state, app.handle())?;
+            sync_runtime(&settings, &state, app.handle(), false)?;
             Ok(())
         })
         .on_window_event(|window, event| {

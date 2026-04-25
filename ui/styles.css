@@ -28,7 +28,8 @@ body[data-enabled="false"] {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -364,13 +365,18 @@ label {
   font-weight: 700;
 }
 
-label input[type="number"] {
+label input[type="number"],
+label select {
   width: 100%;
   border: 1px solid #c8d0c7;
   border-radius: 7px;
   background: #fbfcfa;
   color: #27342d;
   padding: 9px 10px;
+}
+
+label select {
+  min-height: 40px;
 }
 
 .phrase-card {

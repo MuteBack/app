@@ -11,6 +11,8 @@ const controls = {
   levelValue: document.querySelector("#duck-level-value"),
   restoreModeLabel: document.querySelector("#restore-mode-label"),
   voiceMatchLabel: document.querySelector("#voice-match-label"),
+  microphoneLabel: document.querySelector("#microphone-label"),
+  microphoneSelect: document.querySelector("#microphone-select"),
   transitionButtons: [...document.querySelectorAll("[data-transition]")],
   manualRestore: document.querySelector("#manual-restore"),
   voiceMatchEnabled: document.querySelector("#voice-match-enabled"),
@@ -43,11 +45,13 @@ const enrollmentCapture = {
 
 let settings = await invoke("get_settings");
 let enrollment = await invoke("get_voice_enrollment");
+let microphones = await invoke("list_microphones");
 let isRecording = false;
 let runtimeStatus = await invoke("get_runtime_status");
 
 function render() {
   const enrollmentComplete = Boolean(enrollment.profile);
+  const microphoneName = selectedMicrophoneName();
   controls.appEnabled.checked = settings.enabled;
   controls.level.value = settings.duckLevelPercent;
   controls.levelValue.value = `${settings.duckLevelPercent}%`;
@@ -58,6 +62,7 @@ function render() {
   controls.voiceMatchEnabled.checked = enrollmentComplete && settings.voiceMatchEnabled;
   controls.restoreModeLabel.textContent = settings.manualRestore ? "Manual" : "Automatic";
   controls.voiceMatchLabel.textContent = enrollmentComplete && settings.voiceMatchEnabled ? "On" : "Off";
+  controls.microphoneLabel.textContent = microphoneName;
   document.body.dataset.enabled = settings.enabled;
   controls.timingGrid.dataset.disabled = settings.transition === "instant";
   controls.previewFill.style.width = `${Math.max(settings.duckLevelPercent, 2)}%`;
@@ -67,6 +72,7 @@ function render() {
   }
 
   renderRuntime();
+  renderMicrophones();
   renderEnrollment();
 }
 
@@ -123,9 +129,11 @@ function statusTitle(state) {
 }
 
 async function openSettings() {
+  microphones = await invoke("list_microphones");
   await invoke("set_main_view", { view: "settings" });
   controls.homePage.hidden = true;
   controls.settingsPage.hidden = false;
+  render();
 }
 
 function showHome() {
@@ -145,10 +153,43 @@ function settingsFromControls(overrides = {}) {
     transition: settings.transition,
     manualRestore: controls.manualRestore.checked,
     voiceMatchEnabled: Boolean(enrollment.profile) && controls.voiceMatchEnabled.checked,
+    microphoneId: controls.microphoneSelect.value || null,
     duckFadeMs: Number(controls.duckFade.value),
     restoreFadeMs: Number(controls.restoreFade.value),
     ...overrides,
   };
+}
+
+function renderMicrophones() {
+  const currentValue = settings.microphoneId ?? "";
+  const expectedValues = new Set(["", ...microphones.map((microphone) => microphone.id)]);
+  const existingValues = new Set(
+    [...controls.microphoneSelect.options].map((option) => option.value),
+  );
+
+  if (
+    controls.microphoneSelect.options.length !== expectedValues.size ||
+    [...expectedValues].some((value) => !existingValues.has(value))
+  ) {
+    controls.microphoneSelect.replaceChildren();
+    controls.microphoneSelect.append(new Option("Default microphone", ""));
+
+    for (const microphone of microphones) {
+      const suffix = microphone.isDefault ? " (default)" : "";
+      controls.microphoneSelect.append(new Option(`${microphone.name}${suffix}`, microphone.id));
+    }
+  }
+
+  controls.microphoneSelect.value = expectedValues.has(currentValue) ? currentValue : "";
+}
+
+function selectedMicrophoneName() {
+  if (!settings.microphoneId) {
+    const defaultMic = microphones.find((microphone) => microphone.isDefault);
+    return defaultMic ? `Default: ${defaultMic.name}` : "Default";
+  }
+
+  return microphones.find((microphone) => microphone.id === settings.microphoneId)?.name ?? "Default";
 }
 
 function renderEnrollment() {
@@ -167,7 +208,7 @@ function renderEnrollment() {
   controls.resetVoice.disabled = sampleCount === 0 || isRecording;
   controls.recordVoice.textContent = isRecording ? "Recording" : "Record Sample";
   controls.voiceProgress.textContent = isComplete
-    ? `${sampleCount}/${required} samples recorded · threshold ${enrollment.profile.threshold.toFixed(2)}`
+    ? `${sampleCount}/${required} samples recorded - threshold ${enrollment.profile.threshold.toFixed(2)}`
     : `${sampleCount}/${required} samples recorded`;
 }
 
@@ -371,6 +412,10 @@ controls.restoreFade.addEventListener("change", () => {
 });
 
 controls.manualRestore.addEventListener("change", () => {
+  save(settingsFromControls());
+});
+
+controls.microphoneSelect.addEventListener("change", () => {
   save(settingsFromControls());
 });
 
