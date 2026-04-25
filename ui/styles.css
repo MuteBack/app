@@ -400,6 +400,54 @@ label select {
   gap: 10px;
 }
 
+.sample-list {
+  display: grid;
+  gap: 8px;
+}
+
+.sample-list:empty {
+  display: none;
+}
+
+.sample-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid #d8ded6;
+  border-radius: 8px;
+  background: #fbfcfa;
+  padding: 7px 8px 7px 11px;
+}
+
+.sample-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: #27342d;
+  font-size: 0.86rem;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sample-row strong {
+  color: #5b675f;
+  font-size: 0.82rem;
+}
+
+.sample-remove {
+  min-width: 70px;
+  border: 1px solid #c8d0c7;
+  border-radius: 7px;
+  background: #f6f8f4;
+  color: #27342d;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 750;
+  padding: 7px 9px;
+}
+
 .settings-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

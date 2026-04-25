@@ -20,6 +20,7 @@ const controls = {
   resetVoice: document.querySelector("#reset-voice"),
   phraseStep: document.querySelector("#phrase-step"),
   phraseText: document.querySelector("#phrase-text"),
+  voiceSamples: document.querySelector("#voice-samples"),
   voiceProgress: document.querySelector("#voice-progress"),
   duckFade: document.querySelector("#duck-fade-ms"),
   restoreFade: document.querySelector("#restore-fade-ms"),
@@ -129,6 +130,7 @@ function statusTitle(state) {
 }
 
 async function openSettings() {
+  enrollment = await invoke("get_voice_enrollment");
   microphones = await invoke("list_microphones");
   await invoke("set_main_view", { view: "settings" });
   controls.homePage.hidden = true;
@@ -207,9 +209,36 @@ function renderEnrollment() {
   controls.recordVoice.disabled = isRecording || isComplete;
   controls.resetVoice.disabled = sampleCount === 0 || isRecording;
   controls.recordVoice.textContent = isRecording ? "Recording" : "Record Sample";
+  controls.resetVoice.textContent = sampleCount > 0 ? "Reset All" : "Reset";
   controls.voiceProgress.textContent = isComplete
     ? `${sampleCount}/${required} samples recorded - threshold ${enrollment.profile.threshold.toFixed(2)}`
     : `${sampleCount}/${required} samples recorded`;
+  renderVoiceSamples();
+}
+
+function renderVoiceSamples() {
+  controls.voiceSamples.replaceChildren();
+
+  enrollment.samples.forEach((sample, index) => {
+    const row = document.createElement("div");
+    row.className = "sample-row";
+
+    const label = document.createElement("span");
+    label.textContent = `Sample ${index + 1}`;
+
+    const duration = document.createElement("strong");
+    duration.textContent = `${Math.max(sample.durationMs / 1000, 0.1).toFixed(1)}s`;
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "sample-remove";
+    remove.dataset.removeSample = String(index);
+    remove.disabled = isRecording;
+    remove.textContent = "Remove";
+
+    row.append(label, duration, remove);
+    controls.voiceSamples.append(row);
+  });
 }
 
 async function recordVoiceSample() {
@@ -442,6 +471,19 @@ controls.recordVoice.addEventListener("click", async () => {
 controls.resetVoice.addEventListener("click", async () => {
   enrollment = await invoke("reset_voice_enrollment");
   controls.saveStatus.textContent = "Reset";
+  render();
+});
+
+controls.voiceSamples.addEventListener("click", async (event) => {
+  const remove = event.target.closest("[data-remove-sample]");
+  if (!remove || isRecording) {
+    return;
+  }
+
+  enrollment = await invoke("remove_voice_sample", {
+    index: Number(remove.dataset.removeSample),
+  });
+  controls.saveStatus.textContent = "Removed";
   render();
 });
 

@@ -112,6 +112,7 @@ impl VadEngine for EnergyGateVad {
 #[derive(Debug, Clone)]
 pub struct NearFieldGateConfig {
     pub minimum_noise_floor: f32,
+    pub maximum_noise_floor: f32,
     pub start_multiplier: f32,
     pub continue_multiplier: f32,
     pub minimum_start_rms: f32,
@@ -124,14 +125,15 @@ pub struct NearFieldGateConfig {
 impl Default for NearFieldGateConfig {
     fn default() -> Self {
         Self {
-            minimum_noise_floor: 0.006,
-            start_multiplier: 3.2,
-            continue_multiplier: 1.7,
-            minimum_start_rms: 0.020,
-            minimum_continue_rms: 0.012,
-            adaptation_rate: 0.06,
-            blocked_speech_adaptation_rate: 0.14,
-            calibration_time: Duration::from_millis(1_200),
+            minimum_noise_floor: 0.005,
+            maximum_noise_floor: 0.022,
+            start_multiplier: 2.1,
+            continue_multiplier: 1.35,
+            minimum_start_rms: 0.016,
+            minimum_continue_rms: 0.009,
+            adaptation_rate: 0.035,
+            blocked_speech_adaptation_rate: 0.045,
+            calibration_time: Duration::from_millis(700),
         }
     }
 }
@@ -172,9 +174,17 @@ impl<V> NearFieldVad<V> {
     }
 
     fn adapt_noise_floor(&mut self, rms: f32, rate: f32) {
-        let target = rms.max(self.config.minimum_noise_floor);
+        let target = rms
+            .clamp(
+                self.config.minimum_noise_floor,
+                self.config.maximum_noise_floor,
+            )
+            .max(self.config.minimum_noise_floor);
         self.noise_floor += (target - self.noise_floor) * rate.clamp(0.0, 1.0);
-        self.noise_floor = self.noise_floor.max(self.config.minimum_noise_floor);
+        self.noise_floor = self.noise_floor.clamp(
+            self.config.minimum_noise_floor,
+            self.config.maximum_noise_floor,
+        );
     }
 
     fn passes_near_field_gate(&self, decision: VadDecision, rms: f32) -> bool {
@@ -761,6 +771,7 @@ mod tests {
     fn gate_config() -> NearFieldGateConfig {
         NearFieldGateConfig {
             minimum_noise_floor: 0.006,
+            maximum_noise_floor: 0.022,
             start_multiplier: 3.0,
             continue_multiplier: 1.5,
             minimum_start_rms: 0.020,
@@ -816,6 +827,23 @@ mod tests {
         vad.reset();
 
         assert_eq!(vad.into_inner().resets, 1);
+    }
+
+    #[test]
+    fn near_field_gate_caps_playback_bleed_noise_floor() {
+        let mut config = gate_config();
+        config.start_multiplier = 2.1;
+        config.minimum_start_rms = 0.016;
+        let inner =
+            SequenceVad::new([vec![VadDecision::Silence; 24], vec![VadDecision::Speech]].concat());
+        let mut vad = NearFieldVad::with_config(inner, Duration::from_millis(32), config);
+
+        for _ in 0..24 {
+            assert_eq!(vad.process_frame(&[2_200; 512]), VadDecision::Silence);
+        }
+
+        assert!(vad.noise_floor() <= 0.022);
+        assert_eq!(vad.process_frame(&[1_800; 512]), VadDecision::Speech);
     }
 
     fn reference_config() -> ReferenceAudioConfig {

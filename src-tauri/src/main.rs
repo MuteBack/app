@@ -18,6 +18,7 @@ use tauri::{
 };
 
 const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/tray.png");
+const TRAY_ID: &str = "main-tray";
 const MAIN_HOME_SIZE: (f64, f64) = (360.0, 290.0);
 const MAIN_SETTINGS_SIZE: (f64, f64) = (620.0, 720.0);
 const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (500.0, 520.0);
@@ -133,11 +134,80 @@ impl VoiceEnrollment {
 #[serde(rename_all = "camelCase")]
 struct StoredVoiceProfile {
     required_samples: u8,
-    samples: Vec<VoiceSample>,
+    samples: Vec<StoredVoiceSample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile: Option<StoredSpeakerProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    embedding: Option<Vec<f32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    threshold: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredVoiceSample {
+    phrase_index: u8,
+    duration_ms: u64,
+    bytes: u64,
+    #[serde(default)]
+    embedding: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredSpeakerProfile {
     embedding: Vec<f32>,
     threshold: f32,
     sample_rate: u32,
     model_id: String,
+}
+
+impl From<&VoiceSample> for StoredVoiceSample {
+    fn from(sample: &VoiceSample) -> Self {
+        Self {
+            phrase_index: sample.phrase_index,
+            duration_ms: sample.duration_ms,
+            bytes: sample.bytes,
+            embedding: sample.embedding.clone(),
+        }
+    }
+}
+
+impl From<StoredVoiceSample> for VoiceSample {
+    fn from(sample: StoredVoiceSample) -> Self {
+        Self {
+            phrase_index: sample.phrase_index,
+            duration_ms: sample.duration_ms,
+            bytes: sample.bytes,
+            embedding: sample.embedding,
+        }
+    }
+}
+
+impl From<&SpeakerProfile> for StoredSpeakerProfile {
+    fn from(profile: &SpeakerProfile) -> Self {
+        Self {
+            embedding: profile.embedding.clone(),
+            threshold: profile.threshold,
+            sample_rate: profile.sample_rate,
+            model_id: profile.model_id.clone(),
+        }
+    }
+}
+
+impl From<StoredSpeakerProfile> for SpeakerProfile {
+    fn from(profile: StoredSpeakerProfile) -> Self {
+        Self {
+            embedding: profile.embedding,
+            threshold: profile.threshold,
+            sample_rate: profile.sample_rate,
+            model_id: profile.model_id,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -271,26 +341,46 @@ fn add_voice_sample(
             bytes,
             embedding,
         });
-
-        if enrollment.samples.len() >= enrollment.required_samples as usize {
-            let embeddings = enrollment
-                .samples
-                .iter()
-                .map(|sample| sample.embedding.clone())
-                .collect::<Vec<_>>();
-            let profile = build_voice_profile(&embeddings).map_err(|error| error.to_string())?;
-            enrollment.profile = Some(VoiceProfileSummary {
-                model_id: profile.model_id.clone(),
-                threshold: profile.threshold,
-                sample_count: enrollment.samples.len() as u8,
-            });
-            enrollment.speaker_profile = Some(profile);
-            persist_voice_profile(&app, &enrollment)?;
-        }
+        normalize_voice_sample_order(&mut enrollment);
+        refresh_voice_profile(&mut enrollment)?;
 
         enrollment.clone()
     };
 
+    persist_voice_profile(&app, &result)?;
+    let settings = state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "settings state is unavailable".to_string())?;
+    sync_runtime(&settings, &state, &app, false)?;
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn remove_voice_sample(
+    index: u32,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceEnrollment, String> {
+    let result = {
+        let mut enrollment = state
+            .voice_enrollment
+            .lock()
+            .map_err(|_| "voice enrollment state is unavailable".to_string())?;
+        let index = index as usize;
+        if index >= enrollment.samples.len() {
+            return Err("voice sample does not exist".to_string());
+        }
+
+        enrollment.samples.remove(index);
+        normalize_voice_sample_order(&mut enrollment);
+        refresh_voice_profile(&mut enrollment)?;
+        enrollment.clone()
+    };
+
+    persist_voice_profile(&app, &result)?;
     let settings = state
         .settings
         .lock()
@@ -400,7 +490,9 @@ fn sync_runtime(
             status.microphone = None;
         });
         Ok(())
-    }
+    }?;
+
+    update_tray_icon(app, state)
 }
 
 fn start_or_update_runtime(
@@ -510,6 +602,7 @@ fn watch_runtime_events(
                 }
             }
 
+            let _ = update_tray_icon_from_shared(&app, &settings, &runtime_status);
             let _ = update_restore_prompt_from_shared(&app, &settings, &runtime_status);
 
             if stopped {
@@ -574,75 +667,191 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn load_voice_profile(app: &AppHandle) -> Result<Option<VoiceEnrollment>, String> {
-    let path = voice_profile_path(app)?;
-    if !path.exists() {
-        return Ok(None);
+    for path in voice_profile_paths(app)? {
+        if !path.exists() {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read voice profile: {error}"))?;
+        let enrollment = parse_voice_profile(&contents)
+            .map_err(|error| format!("failed to parse voice profile: {error}"))?;
+        return Ok(Some(enrollment));
     }
 
-    let contents = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read voice profile: {error}"))?;
-    let stored = serde_json::from_str::<StoredVoiceProfile>(&contents)
-        .map_err(|error| format!("failed to parse voice profile: {error}"))?;
-    let speaker_profile = SpeakerProfile {
-        embedding: stored.embedding,
-        threshold: stored.threshold,
-        sample_rate: stored.sample_rate,
-        model_id: stored.model_id.clone(),
-    };
-    let profile = Some(VoiceProfileSummary {
-        model_id: stored.model_id,
-        threshold: stored.threshold,
-        sample_count: stored.samples.len() as u8,
-    });
+    Ok(None)
+}
 
-    Ok(Some(VoiceEnrollment {
-        required_samples: stored.required_samples,
-        samples: stored.samples,
+fn parse_voice_profile(contents: &str) -> Result<VoiceEnrollment, String> {
+    let stored =
+        serde_json::from_str::<StoredVoiceProfile>(contents).map_err(|error| error.to_string())?;
+    let required_samples = stored.required_samples.max(1);
+    let speaker_profile = stored_speaker_profile(&stored);
+    let samples = stored
+        .samples
+        .into_iter()
+        .map(VoiceSample::from)
+        .collect::<Vec<_>>();
+    let profile = speaker_profile
+        .as_ref()
+        .map(|profile| voice_profile_summary(profile, samples.len()));
+    let mut enrollment = VoiceEnrollment {
+        required_samples,
+        samples,
         profile,
-        speaker_profile: Some(speaker_profile),
-    }))
+        speaker_profile,
+    };
+
+    if enrollment.speaker_profile.is_none() {
+        refresh_voice_profile(&mut enrollment)?;
+    }
+
+    Ok(enrollment)
 }
 
 fn persist_voice_profile(app: &AppHandle, enrollment: &VoiceEnrollment) -> Result<(), String> {
-    let Some(profile) = enrollment.speaker_profile.as_ref() else {
-        return Ok(());
-    };
+    let paths = voice_profile_paths(app)?;
 
-    let path = voice_profile_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create voice profile directory: {error}"))?;
+    if enrollment.samples.is_empty() && enrollment.speaker_profile.is_none() {
+        for path in paths {
+            if path.exists() {
+                fs::remove_file(path)
+                    .map_err(|error| format!("failed to delete voice profile: {error}"))?;
+            }
+        }
+        return Ok(());
     }
 
     let stored = StoredVoiceProfile {
         required_samples: enrollment.required_samples,
-        samples: enrollment.samples.clone(),
-        embedding: profile.embedding.clone(),
-        threshold: profile.threshold,
-        sample_rate: profile.sample_rate,
-        model_id: profile.model_id.clone(),
+        samples: enrollment.samples.iter().map(StoredVoiceSample::from).collect(),
+        profile: enrollment.speaker_profile.as_ref().map(StoredSpeakerProfile::from),
+        embedding: None,
+        threshold: None,
+        sample_rate: None,
+        model_id: None,
     };
     let contents = serde_json::to_string_pretty(&stored)
         .map_err(|error| format!("failed to encode voice profile: {error}"))?;
 
-    fs::write(path, contents).map_err(|error| format!("failed to save voice profile: {error}"))
-}
-
-fn delete_voice_profile(app: &AppHandle) -> Result<(), String> {
-    let path = voice_profile_path(app)?;
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| format!("failed to delete voice profile: {error}"))?;
+    for path in paths {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create voice profile directory: {error}"))?;
+        }
+        fs::write(path, &contents)
+            .map_err(|error| format!("failed to save voice profile: {error}"))?;
     }
 
     Ok(())
 }
 
-fn voice_profile_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to locate app data directory: {error}"))?
-        .join("voice-profile.json"))
+fn stored_speaker_profile(stored: &StoredVoiceProfile) -> Option<SpeakerProfile> {
+    if let Some(profile) = stored.profile.as_ref() {
+        return Some(SpeakerProfile {
+            embedding: profile.embedding.clone(),
+            threshold: profile.threshold,
+            sample_rate: profile.sample_rate,
+            model_id: profile.model_id.clone(),
+        });
+    }
+
+    let (Some(embedding), Some(threshold), Some(sample_rate), Some(model_id)) = (
+        stored.embedding.as_ref(),
+        stored.threshold,
+        stored.sample_rate,
+        stored.model_id.as_ref(),
+    ) else {
+        return None;
+    };
+
+    if embedding.is_empty() || model_id.is_empty() {
+        return None;
+    }
+
+    Some(SpeakerProfile {
+        embedding: embedding.clone(),
+        threshold,
+        sample_rate,
+        model_id: model_id.clone(),
+    })
+}
+
+fn refresh_voice_profile(enrollment: &mut VoiceEnrollment) -> Result<(), String> {
+    if enrollment.samples.len() < enrollment.required_samples as usize {
+        enrollment.profile = None;
+        enrollment.speaker_profile = None;
+        return Ok(());
+    }
+
+    let embeddings = enrollment
+        .samples
+        .iter()
+        .map(|sample| sample.embedding.clone())
+        .collect::<Vec<_>>();
+
+    if embeddings.iter().any(Vec::is_empty) {
+        enrollment.profile = None;
+        enrollment.speaker_profile = None;
+        return Ok(());
+    }
+
+    let profile = build_voice_profile(&embeddings).map_err(|error| error.to_string())?;
+    enrollment.profile = Some(voice_profile_summary(&profile, enrollment.samples.len()));
+    enrollment.speaker_profile = Some(profile);
+    Ok(())
+}
+
+fn normalize_voice_sample_order(enrollment: &mut VoiceEnrollment) {
+    for (index, sample) in enrollment.samples.iter_mut().enumerate() {
+        sample.phrase_index = index as u8;
+    }
+}
+
+fn voice_profile_summary(profile: &SpeakerProfile, sample_count: usize) -> VoiceProfileSummary {
+    VoiceProfileSummary {
+        model_id: profile.model_id.clone(),
+        threshold: profile.threshold,
+        sample_count: sample_count as u8,
+    }
+}
+
+fn delete_voice_profile(app: &AppHandle) -> Result<(), String> {
+    for path in voice_profile_paths(app)? {
+        if path.exists() {
+            fs::remove_file(path)
+                .map_err(|error| format!("failed to delete voice profile: {error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn voice_profile_paths(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
+    let resolver = app.path();
+    let mut paths = Vec::new();
+    push_voice_profile_path(
+        &mut paths,
+        resolver
+            .app_data_dir()
+            .map_err(|error| format!("failed to locate app data directory: {error}"))?,
+    );
+
+    if let Ok(path) = resolver.app_local_data_dir() {
+        push_voice_profile_path(&mut paths, path);
+    }
+    if let Ok(path) = resolver.app_config_dir() {
+        push_voice_profile_path(&mut paths, path);
+    }
+
+    Ok(paths)
+}
+
+fn push_voice_profile_path(paths: &mut Vec<PathBuf>, directory: PathBuf) {
+    let path = directory.join("voice-profile.json");
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 fn update_runtime_message(state: &AppState, message: &str) {
@@ -655,6 +864,128 @@ fn set_runtime_status(state: &AppState, update: impl FnOnce(&mut RuntimeStatus))
     if let Ok(mut status) = state.runtime_status.lock() {
         update(&mut status);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayDot {
+    Active,
+    Inactive,
+    Disabled,
+}
+
+impl TrayDot {
+    fn color(self) -> [u8; 3] {
+        match self {
+            Self::Active => [34, 197, 94],
+            Self::Inactive => [148, 163, 184],
+            Self::Disabled => [239, 68, 68],
+        }
+    }
+}
+
+fn update_tray_icon(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    update_tray_icon_from_shared(app, &state.settings, &state.runtime_status)
+}
+
+fn update_tray_icon_from_shared(
+    app: &AppHandle,
+    settings: &Arc<Mutex<Settings>>,
+    runtime_status: &Arc<Mutex<RuntimeStatus>>,
+) -> Result<(), String> {
+    let settings = settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "settings state is unavailable".to_string())?;
+    let status = runtime_status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| "runtime status is unavailable".to_string())?;
+
+    update_tray_icon_inner(app, &settings, &status)
+}
+
+fn update_tray_icon_inner(
+    app: &AppHandle,
+    settings: &Settings,
+    status: &RuntimeStatus,
+) -> Result<(), String> {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return Ok(());
+    };
+
+    let dot = if !settings.enabled || !status.enabled {
+        TrayDot::Disabled
+    } else if status.running {
+        TrayDot::Active
+    } else {
+        TrayDot::Inactive
+    };
+
+    tray.set_icon(Some(tray_icon_with_dot(dot)))
+        .map_err(|error| format!("failed to update tray icon: {error}"))?;
+    let _ = tray.set_tooltip(Some(format!("MuteBack - {}", status.message)));
+
+    Ok(())
+}
+
+fn tray_icon_with_dot(dot: TrayDot) -> tauri::image::Image<'static> {
+    let width = TRAY_ICON.width();
+    let height = TRAY_ICON.height();
+    let mut rgba = TRAY_ICON.rgba().to_vec();
+    draw_tray_status_dot(&mut rgba, width, height, dot.color());
+    tauri::image::Image::new_owned(rgba, width, height)
+}
+
+fn draw_tray_status_dot(rgba: &mut [u8], width: u32, height: u32, color: [u8; 3]) {
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let min_side = width.min(height) as f64;
+    let radius = (min_side * 0.17).round().max(3.0);
+    let border = (min_side * 0.055).round().max(1.0);
+    let padding = (min_side * 0.08).round().max(1.0);
+    let outer_radius = radius + border;
+    let center_x = width as f64 - padding - radius;
+    let center_y = height as f64 - padding - radius;
+    let min_x = (center_x - outer_radius - 1.0).floor().max(0.0) as u32;
+    let min_y = (center_y - outer_radius - 1.0).floor().max(0.0) as u32;
+    let max_x = (center_x + outer_radius + 1.0)
+        .ceil()
+        .min((width - 1) as f64) as u32;
+    let max_y = (center_y + outer_radius + 1.0)
+        .ceil()
+        .min((height - 1) as f64) as u32;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = x as f64 + 0.5 - center_x;
+            let dy = y as f64 + 0.5 - center_y;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let index = ((y * width + x) * 4) as usize;
+
+            if distance <= outer_radius {
+                blend_pixel(rgba, index, [248, 250, 252, 245]);
+            }
+
+            if distance <= radius {
+                blend_pixel(rgba, index, [color[0], color[1], color[2], 255]);
+            }
+        }
+    }
+}
+
+fn blend_pixel(rgba: &mut [u8], index: usize, src: [u8; 4]) {
+    let src_alpha = src[3] as u16;
+    let inverse_alpha = 255 - src_alpha;
+
+    for channel in 0..3 {
+        rgba[index + channel] =
+            ((src[channel] as u16 * src_alpha + rgba[index + channel] as u16 * inverse_alpha)
+                / 255) as u8;
+    }
+
+    rgba[index + 3] = (src_alpha + rgba[index + 3] as u16 * inverse_alpha / 255).min(255) as u8;
 }
 
 fn resize_main_window(
@@ -818,7 +1149,7 @@ fn create_tray(app: &mut tauri::App) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id(TRAY_ID)
         .icon(TRAY_ICON.clone())
         .tooltip("MuteBack")
         .menu(&menu)
@@ -858,6 +1189,7 @@ fn main() {
             get_runtime_status,
             get_voice_enrollment,
             add_voice_sample,
+            remove_voice_sample,
             reset_voice_enrollment,
             request_restore,
             set_main_view,
@@ -876,6 +1208,7 @@ fn main() {
                 *saved_settings = settings;
             }
             if let Some(enrollment) = load_voice_profile(app.handle())? {
+                persist_voice_profile(app.handle(), &enrollment)?;
                 let mut voice_enrollment = state
                     .voice_enrollment
                     .lock()

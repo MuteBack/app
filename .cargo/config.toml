@@ -1,6 +1,6 @@
 [env]
-SILERO_MODEL_PATH = "assets/vendor/silero_vad.onnx"
-SPEAKER_MODEL_PATH = "assets/vendor/voxceleb_ECAPA512_LM.onnx"
-ORT_LIB_LOCATION = "assets/vendor/onnxruntime-win-x64-1.24.2/onnxruntime-win-x64-1.24.2/lib"
+SILERO_MODEL_PATH = { value = "assets/vendor/silero_vad.onnx", relative = true }
+SPEAKER_MODEL_PATH = { value = "assets/vendor/voxceleb_ECAPA512_LM.onnx", relative = true }
+ORT_LIB_LOCATION = { value = "assets/vendor/onnxruntime-win-x64-1.24.2/onnxruntime-win-x64-1.24.2/lib", relative = true }
 ORT_PREFER_DYNAMIC_LINK = "1"
 ORT_SKIP_DOWNLOAD = "1"
