@@ -16,16 +16,19 @@ use tauri::{
     AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
 };
+use tauri_plugin_store::StoreExt;
 
 const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/tray.png");
 const TRAY_ID: &str = "main-tray";
-const MAIN_HOME_SIZE: (f64, f64) = (360.0, 290.0);
-const MAIN_SETTINGS_SIZE: (f64, f64) = (620.0, 720.0);
-const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (500.0, 520.0);
+const MAIN_HOME_SIZE: (f64, f64) = (280.0, 255.0);
+const MAIN_SETTINGS_SIZE: (f64, f64) = (322.0, 542.0);
+const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (322.0, 520.0);
 const RESTORE_WINDOW_LABEL: &str = "restore_prompt";
-const RESTORE_WINDOW_SIZE: (f64, f64) = (196.0, 86.0);
+const RESTORE_WINDOW_SIZE: (f64, f64) = (216.0, 52.0);
 const MAIN_RESIZE_STEPS: u32 = 14;
 const MAIN_RESIZE_FRAME_MS: u64 = 12;
+const SETTINGS_STORE_PATH: &str = "settings.store.json";
+const SETTINGS_STORE_KEY: &str = "settings";
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -85,14 +88,26 @@ struct VoiceSampleInput {
     samples: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoiceSampleAudio {
+    sample_rate: u32,
+    samples: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct VoiceSample {
     phrase_index: u8,
     duration_ms: u64,
     bytes: u64,
+    playable: bool,
     #[serde(skip)]
     embedding: Vec<f32>,
+    #[serde(skip)]
+    audio_sample_rate: u32,
+    #[serde(skip)]
+    audio_samples: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -155,6 +170,10 @@ struct StoredVoiceSample {
     bytes: u64,
     #[serde(default)]
     embedding: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    audio_sample_rate: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    audio_samples: Vec<i16>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -173,17 +192,25 @@ impl From<&VoiceSample> for StoredVoiceSample {
             duration_ms: sample.duration_ms,
             bytes: sample.bytes,
             embedding: sample.embedding.clone(),
+            audio_sample_rate: sample.playable.then_some(sample.audio_sample_rate),
+            audio_samples: sample.audio_samples.clone(),
         }
     }
 }
 
 impl From<StoredVoiceSample> for VoiceSample {
     fn from(sample: StoredVoiceSample) -> Self {
+        let audio_sample_rate = sample.audio_sample_rate.unwrap_or(0);
+        let playable = audio_sample_rate > 0 && !sample.audio_samples.is_empty();
+
         Self {
             phrase_index: sample.phrase_index,
             duration_ms: sample.duration_ms,
             bytes: sample.bytes,
+            playable,
             embedding: sample.embedding,
+            audio_sample_rate,
+            audio_samples: sample.audio_samples,
         }
     }
 }
@@ -220,6 +247,15 @@ struct RuntimeStatus {
     microphone: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheckStatus {
+    configured: bool,
+    update_available: bool,
+    version: Option<String>,
+    message: String,
+}
+
 impl Default for RuntimeStatus {
     fn default() -> Self {
         Self {
@@ -254,6 +290,7 @@ fn update_settings(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<Settings, String> {
+    let input = settings_available_to_state(input, &state)?;
     validate_settings(&input)?;
 
     let restart_runtime = {
@@ -307,6 +344,34 @@ fn get_voice_enrollment(state: tauri::State<'_, AppState>) -> Result<VoiceEnroll
 }
 
 #[tauri::command]
+fn get_voice_sample_audio(
+    index: u32,
+    state: tauri::State<'_, AppState>,
+) -> Result<VoiceSampleAudio, String> {
+    let enrollment = state
+        .voice_enrollment
+        .lock()
+        .map_err(|_| "voice enrollment state is unavailable".to_string())?;
+    let sample = enrollment
+        .samples
+        .get(index as usize)
+        .ok_or_else(|| "voice sample does not exist".to_string())?;
+
+    if !sample.playable {
+        return Err("voice sample audio is not available".to_string());
+    }
+
+    Ok(VoiceSampleAudio {
+        sample_rate: sample.audio_sample_rate,
+        samples: sample
+            .audio_samples
+            .iter()
+            .map(|sample| (*sample as f32 / i16::MAX as f32).clamp(-1.0, 1.0))
+            .collect(),
+    })
+}
+
+#[tauri::command]
 fn add_voice_sample(
     input: VoiceSampleInput,
     app: AppHandle,
@@ -323,7 +388,7 @@ fn add_voice_sample(
     let pcm = resample_f32_to_i16(&input.samples, input.sample_rate, 16_000);
     let mut embedder = OnnxSpeakerEmbeddingEngine::new().map_err(|error| error.to_string())?;
     let embedding = embedder.embed(&pcm).map_err(|error| error.to_string())?;
-    let bytes = input.samples.len() as u64 * std::mem::size_of::<f32>() as u64;
+    let bytes = pcm.len() as u64 * std::mem::size_of::<i16>() as u64;
 
     let result = {
         let mut enrollment = state
@@ -339,7 +404,10 @@ fn add_voice_sample(
             phrase_index: input.phrase_index,
             duration_ms: input.duration_ms,
             bytes,
+            playable: true,
             embedding,
+            audio_sample_rate: 16_000,
+            audio_samples: pcm,
         });
         normalize_voice_sample_order(&mut enrollment);
         refresh_voice_profile(&mut enrollment)?;
@@ -348,11 +416,7 @@ fn add_voice_sample(
     };
 
     persist_voice_profile(&app, &result)?;
-    let settings = state
-        .settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "settings state is unavailable".to_string())?;
+    let settings = settings_after_voice_enrollment_change(&app, &state, &result)?;
     sync_runtime(&settings, &state, &app, false)?;
 
     Ok(result)
@@ -381,11 +445,7 @@ fn remove_voice_sample(
     };
 
     persist_voice_profile(&app, &result)?;
-    let settings = state
-        .settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "settings state is unavailable".to_string())?;
+    let settings = settings_after_voice_enrollment_change(&app, &state, &result)?;
     sync_runtime(&settings, &state, &app, false)?;
 
     Ok(result)
@@ -405,11 +465,7 @@ fn reset_voice_enrollment(
     drop(enrollment);
 
     delete_voice_profile(&app)?;
-    let settings = state
-        .settings
-        .lock()
-        .map(|settings| settings.clone())
-        .map_err(|_| "settings state is unavailable".to_string())?;
+    let settings = settings_after_voice_enrollment_change(&app, &state, &result)?;
     sync_runtime(&settings, &state, &app, false)?;
 
     Ok(result)
@@ -460,12 +516,69 @@ fn start_restore_prompt_drag(window: WebviewWindow) -> Result<(), String> {
     window.start_dragging().map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn check_for_updates() -> UpdateCheckStatus {
+    UpdateCheckStatus {
+        configured: false,
+        update_available: false,
+        version: None,
+        message: "Updater is scaffolded but not configured yet.".to_string(),
+    }
+}
+
 fn validate_settings(settings: &Settings) -> Result<(), String> {
     if settings.duck_level_percent > 100 {
         return Err("ducking level must be between 0 and 100".to_string());
     }
 
     Ok(())
+}
+
+fn settings_available_to_state(
+    mut settings: Settings,
+    _state: &AppState,
+) -> Result<Settings, String> {
+    settings.voice_match_enabled = false;
+
+    Ok(settings)
+}
+
+fn settings_after_voice_enrollment_change(
+    app: &AppHandle,
+    state: &AppState,
+    enrollment: &VoiceEnrollment,
+) -> Result<Settings, String> {
+    let mut settings = state
+        .settings
+        .lock()
+        .map_err(|_| "settings state is unavailable".to_string())?;
+
+    if !enrollment.is_complete() && settings.voice_match_enabled {
+        settings.voice_match_enabled = false;
+        persist_settings(app, &settings)?;
+    }
+
+    Ok(settings.clone())
+}
+
+fn normalize_saved_settings(app: &AppHandle, state: &AppState) -> Result<Settings, String> {
+    let settings = state
+        .settings
+        .lock()
+        .map(|settings| settings.clone())
+        .map_err(|_| "settings state is unavailable".to_string())?;
+    let normalized = settings_available_to_state(settings.clone(), state)?;
+
+    if normalized.voice_match_enabled != settings.voice_match_enabled {
+        let mut saved_settings = state
+            .settings
+            .lock()
+            .map_err(|_| "settings state is unavailable".to_string())?;
+        *saved_settings = normalized.clone();
+        persist_settings(app, &normalized)?;
+    }
+
+    Ok(normalized)
 }
 
 fn sync_runtime(
@@ -634,28 +747,48 @@ fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig 
 }
 
 fn load_settings(app: &AppHandle) -> Result<Option<Settings>, String> {
+    let store = app
+        .store(SETTINGS_STORE_PATH)
+        .map_err(|error| format!("failed to open settings store: {error}"))?;
+
+    if let Some(value) = store.get(SETTINGS_STORE_KEY) {
+        return serde_json::from_value::<Settings>(value.clone())
+            .map(Some)
+            .map_err(|error| format!("failed to parse settings from store: {error}"));
+    }
+
+    let legacy_settings = load_legacy_settings(app)?;
+    if let Some(settings) = legacy_settings.as_ref() {
+        persist_settings(app, settings)?;
+    }
+
+    Ok(legacy_settings)
+}
+
+fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
+    let store = app
+        .store(SETTINGS_STORE_PATH)
+        .map_err(|error| format!("failed to open settings store: {error}"))?;
+    let value =
+        serde_json::to_value(settings).map_err(|error| format!("failed to encode settings: {error}"))?;
+
+    store.set(SETTINGS_STORE_KEY, value);
+    store
+        .save()
+        .map_err(|error| format!("failed to save settings store: {error}"))
+}
+
+fn load_legacy_settings(app: &AppHandle) -> Result<Option<Settings>, String> {
     let path = settings_path(app)?;
     if !path.exists() {
         return Ok(None);
     }
 
-    let contents =
-        fs::read_to_string(&path).map_err(|error| format!("failed to read settings: {error}"))?;
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read legacy settings file: {error}"))?;
     serde_json::from_str::<Settings>(&contents)
         .map(Some)
-        .map_err(|error| format!("failed to parse settings: {error}"))
-}
-
-fn persist_settings(app: &AppHandle, settings: &Settings) -> Result<(), String> {
-    let path = settings_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create settings directory: {error}"))?;
-    }
-
-    let contents = serde_json::to_string_pretty(settings)
-        .map_err(|error| format!("failed to encode settings: {error}"))?;
-    fs::write(path, contents).map_err(|error| format!("failed to save settings: {error}"))
+        .map_err(|error| format!("failed to parse legacy settings: {error}"))
 }
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1134,7 +1267,8 @@ fn create_restore_window(app: &mut tauri::App) -> tauri::Result<()> {
     .max_inner_size(RESTORE_WINDOW_SIZE.0, RESTORE_WINDOW_SIZE.1)
     .resizable(false)
     .decorations(false)
-    .transparent(true)
+    .transparent(false)
+    .background_color(tauri::webview::Color(21, 25, 34, 255))
     .always_on_top(true)
     .skip_taskbar(true)
     .visible(false)
@@ -1185,9 +1319,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             update_settings,
+            check_for_updates,
             list_microphones,
             get_runtime_status,
             get_voice_enrollment,
+            get_voice_sample_audio,
             add_voice_sample,
             remove_voice_sample,
             reset_voice_enrollment,
@@ -1197,6 +1333,12 @@ fn main() {
             start_restore_prompt_drag
         ])
         .setup(|app| {
+            app.handle()
+                .plugin(tauri_plugin_store::Builder::default().build())
+                .map_err(|error| format!("failed to register store plugin: {error}"))?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .map_err(|error| format!("failed to register updater plugin: {error}"))?;
             create_tray(app)?;
             create_restore_window(app)?;
             let state = app.state::<AppState>();
@@ -1215,11 +1357,7 @@ fn main() {
                     .map_err(|_| "voice enrollment state is unavailable")?;
                 *voice_enrollment = enrollment;
             }
-            let settings = state
-                .settings
-                .lock()
-                .map(|settings| settings.clone())
-                .map_err(|_| "settings state is unavailable")?;
+            let settings = normalize_saved_settings(app.handle(), &state)?;
             sync_runtime(&settings, &state, app.handle(), false)?;
             Ok(())
         })

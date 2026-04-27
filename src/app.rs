@@ -112,7 +112,10 @@ mod tests {
     use super::{AudioTick, MuteBackApp};
     use crate::config::AppConfig;
     use crate::ducking::{AppliedDucking, NoopDucker};
-    use crate::vad::{VadDecision, VadEngine};
+    use crate::session::SessionAction;
+    use crate::vad::{
+        NearFieldVad, ReferenceRejectingVad, SharedReferenceAudio, VadDecision, VadEngine,
+    };
 
     struct SequenceVad {
         decisions: Vec<VadDecision>,
@@ -141,6 +144,87 @@ mod tests {
                 .unwrap_or(VadDecision::Silence);
             self.cursor += 1;
             decision
+        }
+    }
+
+    #[derive(Debug)]
+    struct DuckingQualityReport {
+        duck_actions: u32,
+        first_duck_after_background_start: Option<Duration>,
+        first_duck_after_speech_start: Option<Duration>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct PlaybackScenario {
+        frames: usize,
+        reference_rms: f32,
+        bleed_ratio: f32,
+        speech_start_frame: Option<usize>,
+        speech_rms: f32,
+    }
+
+    fn constant_frame(rms: f32) -> Vec<i16> {
+        let sample = (rms.clamp(0.0, 1.0) * i16::MAX as f32) as i16;
+        vec![sample; 512]
+    }
+
+    fn combined_rms(a: f32, b: f32) -> f32 {
+        (a.mul_add(a, b * b)).sqrt().clamp(0.0, 1.0)
+    }
+
+    fn measure_playback_ducking_quality(scenario: PlaybackScenario) -> DuckingQualityReport {
+        let frame_duration = Duration::from_millis(32);
+        let calibration_frames = 24;
+        let total_frames = calibration_frames + scenario.frames;
+        let reference = SharedReferenceAudio::new();
+        let inner = SequenceVad::new(vec![VadDecision::Speech; total_frames]);
+        let near_field = NearFieldVad::new(inner, frame_duration);
+        let vad = ReferenceRejectingVad::new(near_field, reference.clone());
+        let mut app = MuteBackApp::new(AppConfig::default(), vad, NoopDucker::default());
+        let tick = AudioTick {
+            elapsed: frame_duration,
+            hotkey_pressed: false,
+            explicit_stop: false,
+        };
+        let silence = constant_frame(0.0);
+        let mut duck_actions = 0;
+        let mut first_duck_after_background_start = None;
+        let mut first_duck_after_speech_start = None;
+
+        for _ in 0..calibration_frames {
+            let _ = app.process_audio_frame(&silence, tick).unwrap();
+        }
+
+        for frame_index in 0..scenario.frames {
+            reference.update_rms(scenario.reference_rms);
+
+            let bleed_rms = scenario.reference_rms * scenario.bleed_ratio;
+            let speech_rms = scenario
+                .speech_start_frame
+                .filter(|speech_start| frame_index >= *speech_start)
+                .map(|_| scenario.speech_rms)
+                .unwrap_or(0.0);
+            let mic_frame = constant_frame(combined_rms(bleed_rms, speech_rms));
+            let update = app.process_audio_frame(&mic_frame, tick).unwrap();
+
+            if update.action == Some(SessionAction::Duck) {
+                duck_actions += 1;
+                first_duck_after_background_start
+                    .get_or_insert(frame_duration * frame_index as u32);
+
+                if let Some(speech_start) = scenario.speech_start_frame {
+                    if frame_index >= speech_start {
+                        first_duck_after_speech_start
+                            .get_or_insert(frame_duration * (frame_index - speech_start) as u32);
+                    }
+                }
+            }
+        }
+
+        DuckingQualityReport {
+            duck_actions,
+            first_duck_after_background_start,
+            first_duck_after_speech_start,
         }
     }
 
@@ -184,5 +268,50 @@ mod tests {
 
         let (_, ducker) = app.into_parts();
         assert_eq!(ducker.current(), AppliedDucking::Restored);
+    }
+
+    #[test]
+    fn quality_does_not_duck_on_music_playback_bleed() {
+        let report = measure_playback_ducking_quality(PlaybackScenario {
+            frames: 120,
+            reference_rms: 0.22,
+            bleed_ratio: 0.22,
+            speech_start_frame: None,
+            speech_rms: 0.0,
+        });
+
+        assert_eq!(report.duck_actions, 0, "{report:?}");
+        assert_eq!(report.first_duck_after_background_start, None);
+    }
+
+    #[test]
+    fn quality_does_not_duck_on_vlog_playback_bleed() {
+        let report = measure_playback_ducking_quality(PlaybackScenario {
+            frames: 120,
+            reference_rms: 0.18,
+            bleed_ratio: 0.30,
+            speech_start_frame: None,
+            speech_rms: 0.0,
+        });
+
+        assert_eq!(report.duck_actions, 0, "{report:?}");
+        assert_eq!(report.first_duck_after_background_start, None);
+    }
+
+    #[test]
+    fn quality_ducks_quickly_for_near_field_speech_over_music() {
+        let report = measure_playback_ducking_quality(PlaybackScenario {
+            frames: 120,
+            reference_rms: 0.22,
+            bleed_ratio: 0.22,
+            speech_start_frame: Some(40),
+            speech_rms: 0.090,
+        });
+
+        assert_eq!(report.duck_actions, 1, "{report:?}");
+        assert!(
+            report.first_duck_after_speech_start <= Some(Duration::from_millis(260)),
+            "{report:?}"
+        );
     }
 }

@@ -65,8 +65,10 @@ Current GUI status:
 - larger settings page for ducking level, smooth/instant transition, fade timings, manual restore, and voice onboarding
 - manual restore button appears in a separate always-on-top OS window when audio is currently lowered
 - optional voice onboarding flow with three local recording samples
-- onboarding records short local PCM samples through the WebView, embeds them with the local WeSpeaker ECAPA ONNX model, then stores only the derived voice profile
+- onboarding records short local PCM samples through the WebView, embeds them with the local WeSpeaker ECAPA ONNX model, and stores the derived voice profile plus local sample audio for playback/removal
 - optional speaker verification gates ducking session start when a voice profile is enrolled and Voice Match is enabled
+- settings persistence now uses `tauri-plugin-store` with one-time migration from the legacy `settings.json` file
+- updater plugin is scaffolded and exposed through a backend check command, but remains inactive until release endpoints/signing are configured
 
 Current limitations:
 

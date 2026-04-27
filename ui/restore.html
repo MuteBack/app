@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="restore-document">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -8,12 +8,13 @@
   </head>
   <body class="restore-body">
     <main class="restore-window">
-      <div class="restore-drag-region" id="restore-drag-region" data-tauri-drag-region>
-        <span data-tauri-drag-region>Sound lowered</span>
-        <i data-tauri-drag-region></i>
-      </div>
-      <button type="button" class="restore-window-button" id="restore-sound">
-        Restore Sound
+      <button type="button" class="restore-pill" id="restore-sound">
+        <img class="restore-icon" src="./muteback-icon.png" alt="" aria-hidden="true" />
+        <span>
+          <small>Sound Lowered</small>
+          <strong class="restore-label" id="restore-label">Restore Sound</strong>
+        </span>
+        <span class="restore-stop" aria-hidden="true"></span>
       </button>
     </main>
 

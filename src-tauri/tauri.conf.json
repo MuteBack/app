@@ -12,16 +12,25 @@
       {
         "label": "main",
         "title": "MuteBack",
-        "width": 360,
-        "height": 290,
-        "minWidth": 360,
-        "minHeight": 290,
+        "width": 280,
+        "height": 190,
+        "minWidth": 280,
+        "minHeight": 190,
         "resizable": false,
         "fullscreen": false
       }
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": [
+        "https://updates.example.com/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "REPLACE_WITH_UPDATER_PUBKEY"
     }
   },
   "bundle": {

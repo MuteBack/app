@@ -7,6 +7,7 @@ const controls = {
   closeSettings: document.querySelector("#close-settings"),
   appEnabled: document.querySelector("#app-enabled"),
   statusDot: document.querySelector("#status-dot"),
+  statusText: document.querySelector("#status-text"),
   level: document.querySelector("#duck-level"),
   levelValue: document.querySelector("#duck-level-value"),
   restoreModeLabel: document.querySelector("#restore-mode-label"),
@@ -29,6 +30,12 @@ const controls = {
   saveStatus: document.querySelector("#save-status"),
 };
 
+function addListener(element, eventName, handler) {
+  if (element) {
+    element.addEventListener(eventName, handler);
+  }
+}
+
 const phrases = [
   "Today I want my music to move out of the way when I speak.",
   "This app should listen for my voice and ignore background speech.",
@@ -48,10 +55,10 @@ let settings = await invoke("get_settings");
 let enrollment = await invoke("get_voice_enrollment");
 let microphones = await invoke("list_microphones");
 let isRecording = false;
+let activeSamplePlayback = null;
 let runtimeStatus = await invoke("get_runtime_status");
 
 function render() {
-  const enrollmentComplete = Boolean(enrollment.profile);
   const microphoneName = selectedMicrophoneName();
   controls.appEnabled.checked = settings.enabled;
   controls.level.value = settings.duckLevelPercent;
@@ -59,14 +66,20 @@ function render() {
   controls.duckFade.value = settings.duckFadeMs;
   controls.restoreFade.value = settings.restoreFadeMs;
   controls.manualRestore.checked = settings.manualRestore;
-  controls.voiceMatchEnabled.disabled = !enrollmentComplete;
-  controls.voiceMatchEnabled.checked = enrollmentComplete && settings.voiceMatchEnabled;
   controls.restoreModeLabel.textContent = settings.manualRestore ? "Manual" : "Automatic";
-  controls.voiceMatchLabel.textContent = enrollmentComplete && settings.voiceMatchEnabled ? "On" : "Off";
+  if (controls.voiceMatchEnabled) {
+    controls.voiceMatchEnabled.disabled = true;
+    controls.voiceMatchEnabled.checked = false;
+  }
+  if (controls.voiceMatchLabel) {
+    controls.voiceMatchLabel.textContent = "Off";
+  }
   controls.microphoneLabel.textContent = microphoneName;
   document.body.dataset.enabled = settings.enabled;
   controls.timingGrid.dataset.disabled = settings.transition === "instant";
-  controls.previewFill.style.width = `${Math.max(settings.duckLevelPercent, 2)}%`;
+  if (controls.previewFill) {
+    controls.previewFill.style.width = `${Math.max(settings.duckLevelPercent, 2)}%`;
+  }
 
   for (const button of controls.transitionButtons) {
     button.dataset.active = button.dataset.transition === settings.transition;
@@ -114,6 +127,10 @@ function renderRuntime() {
 
   controls.statusDot.dataset.state = state;
   controls.statusDot.title = statusTitle(state);
+  controls.statusDot.parentElement.dataset.state = state;
+  if (controls.statusText) {
+    controls.statusText.textContent = statusLabel(state);
+  }
 }
 
 function statusTitle(state) {
@@ -126,6 +143,19 @@ function statusTitle(state) {
       return "MuteBack is disabled";
     default:
       return "MuteBack is stopped";
+  }
+}
+
+function statusLabel(state) {
+  switch (state) {
+    case "running":
+      return "Active - ducking background audio";
+    case "ducked":
+      return "Sound lowered";
+    case "disabled":
+      return "Disabled";
+    default:
+      return "Stopped";
   }
 }
 
@@ -154,7 +184,7 @@ function settingsFromControls(overrides = {}) {
     duckLevelPercent: Number(controls.level.value),
     transition: settings.transition,
     manualRestore: controls.manualRestore.checked,
-    voiceMatchEnabled: Boolean(enrollment.profile) && controls.voiceMatchEnabled.checked,
+    voiceMatchEnabled: false,
     microphoneId: controls.microphoneSelect.value || null,
     duckFadeMs: Number(controls.duckFade.value),
     restoreFadeMs: Number(controls.restoreFade.value),
@@ -195,6 +225,16 @@ function selectedMicrophoneName() {
 }
 
 function renderEnrollment() {
+  if (
+    !controls.phraseStep ||
+    !controls.phraseText ||
+    !controls.recordVoice ||
+    !controls.resetVoice ||
+    !controls.voiceProgress
+  ) {
+    return;
+  }
+
   const sampleCount = enrollment.samples.length;
   const required = enrollment.requiredSamples;
   const currentIndex = Math.min(sampleCount, phrases.length - 1);
@@ -217,6 +257,10 @@ function renderEnrollment() {
 }
 
 function renderVoiceSamples() {
+  if (!controls.voiceSamples) {
+    return;
+  }
+
   controls.voiceSamples.replaceChildren();
 
   enrollment.samples.forEach((sample, index) => {
@@ -229,19 +273,29 @@ function renderVoiceSamples() {
     const duration = document.createElement("strong");
     duration.textContent = `${Math.max(sample.durationMs / 1000, 0.1).toFixed(1)}s`;
 
+    const play = document.createElement("button");
+    play.type = "button";
+    play.className = "sample-action";
+    play.dataset.playSample = String(index);
+    play.disabled = isRecording || !sample.playable;
+    play.title = sample.playable ? "Play sample" : "Audio unavailable for this sample";
+    play.textContent = activeSamplePlayback?.index === index ? "Stop" : "Play";
+
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "sample-remove";
+    remove.className = "sample-action danger";
     remove.dataset.removeSample = String(index);
     remove.disabled = isRecording;
     remove.textContent = "Remove";
 
-    row.append(label, duration, remove);
+    row.append(label, duration, play, remove);
     controls.voiceSamples.append(row);
   });
 }
 
 async function recordVoiceSample() {
+  stopSamplePlayback({ renderAfter: false });
+
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
     controls.saveStatus.textContent = "Mic unsupported";
@@ -267,6 +321,7 @@ async function recordVoiceSample() {
       samples: captured.samples,
     },
   });
+  settings = await invoke("get_settings");
 
   isRecording = false;
   controls.saveStatus.textContent = "Saved";
@@ -395,6 +450,73 @@ async function capturePcmSampleUntilSilence(AudioContextClass, onStatus) {
   };
 }
 
+function stopSamplePlayback({ renderAfter = true } = {}) {
+  const playback = activeSamplePlayback;
+  activeSamplePlayback = null;
+
+  if (!playback) {
+    return;
+  }
+
+  playback.source.onended = null;
+
+  try {
+    playback.source.stop();
+  } catch {
+    // Already stopped by the audio engine.
+  }
+
+  playback.context.close().catch(console.error);
+
+  if (renderAfter) {
+    renderVoiceSamples();
+  }
+}
+
+async function playVoiceSample(index) {
+  if (activeSamplePlayback?.index === index) {
+    stopSamplePlayback();
+    controls.saveStatus.textContent = "Stopped";
+    return;
+  }
+
+  stopSamplePlayback({ renderAfter: false });
+
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) {
+    controls.saveStatus.textContent = "Playback unsupported";
+    return;
+  }
+
+  controls.saveStatus.textContent = "Loading sample";
+  const audio = await invoke("get_voice_sample_audio", { index });
+  if (!audio.samples.length) {
+    controls.saveStatus.textContent = "No audio";
+    return;
+  }
+
+  const context = new AudioContextClass();
+  const source = context.createBufferSource();
+  const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate);
+  buffer.copyToChannel(Float32Array.from(audio.samples), 0);
+  source.buffer = buffer;
+  source.connect(context.destination);
+
+  activeSamplePlayback = { context, index, source };
+  source.onended = () => {
+    if (activeSamplePlayback?.source === source) {
+      activeSamplePlayback = null;
+      context.close().catch(console.error);
+      controls.saveStatus.textContent = "Ready";
+      renderVoiceSamples();
+    }
+  };
+
+  source.start();
+  controls.saveStatus.textContent = "Playing sample";
+  renderVoiceSamples();
+}
+
 function normalizedRms(samples) {
   if (samples.length === 0) {
     return 0;
@@ -408,11 +530,11 @@ function normalizedRms(samples) {
   return Math.sqrt(sum / samples.length);
 }
 
-controls.openSettings.addEventListener("click", () => {
+addListener(controls.openSettings, "click", () => {
   openSettings().catch(console.error);
 });
 
-controls.closeSettings.addEventListener("click", () => {
+addListener(controls.closeSettings, "click", () => {
   closeSettings().catch(console.error);
 });
 
@@ -424,39 +546,31 @@ window.addEventListener("keydown", (event) => {
 
 window.addEventListener("muteback:show-home", showHome);
 
-controls.appEnabled.addEventListener("change", () => {
+addListener(controls.appEnabled, "change", () => {
   save(settingsFromControls());
 });
 
-controls.level.addEventListener("input", () => {
+addListener(controls.level, "input", () => {
   save(settingsFromControls());
 });
 
-controls.duckFade.addEventListener("change", () => {
+addListener(controls.duckFade, "change", () => {
   save(settingsFromControls());
 });
 
-controls.restoreFade.addEventListener("change", () => {
+addListener(controls.restoreFade, "change", () => {
   save(settingsFromControls());
 });
 
-controls.manualRestore.addEventListener("change", () => {
+addListener(controls.manualRestore, "change", () => {
   save(settingsFromControls());
 });
 
-controls.microphoneSelect.addEventListener("change", () => {
+addListener(controls.microphoneSelect, "change", () => {
   save(settingsFromControls());
 });
 
-controls.voiceMatchEnabled.addEventListener("change", () => {
-  if (!enrollment.profile) {
-    controls.voiceMatchEnabled.checked = false;
-    return;
-  }
-  save(settingsFromControls());
-});
-
-controls.recordVoice.addEventListener("click", async () => {
+addListener(controls.recordVoice, "click", async () => {
   try {
     await recordVoiceSample();
   } catch (error) {
@@ -468,21 +582,37 @@ controls.recordVoice.addEventListener("click", async () => {
   }
 });
 
-controls.resetVoice.addEventListener("click", async () => {
+addListener(controls.resetVoice, "click", async () => {
+  stopSamplePlayback({ renderAfter: false });
   enrollment = await invoke("reset_voice_enrollment");
+  settings = await invoke("get_settings");
   controls.saveStatus.textContent = "Reset";
   render();
 });
 
-controls.voiceSamples.addEventListener("click", async (event) => {
+addListener(controls.voiceSamples, "click", async (event) => {
+  const play = event.target.closest("[data-play-sample]");
+  if (play && !isRecording) {
+    try {
+      await playVoiceSample(Number(play.dataset.playSample));
+    } catch (error) {
+      controls.saveStatus.textContent = "Playback error";
+      renderVoiceSamples();
+      console.error(error);
+    }
+    return;
+  }
+
   const remove = event.target.closest("[data-remove-sample]");
   if (!remove || isRecording) {
     return;
   }
 
+  stopSamplePlayback({ renderAfter: false });
   enrollment = await invoke("remove_voice_sample", {
     index: Number(remove.dataset.removeSample),
   });
+  settings = await invoke("get_settings");
   controls.saveStatus.textContent = "Removed";
   render();
 });

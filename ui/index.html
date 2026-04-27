@@ -9,133 +9,112 @@
   <body>
     <main class="app-shell">
       <section class="home-page" id="home-page">
-        <header class="home-card">
-          <div class="brand-row">
-            <div>
-              <p class="eyebrow">Focus Audio</p>
-              <h1>MuteBack</h1>
+        <div class="window-frame home-frame">
+          <div class="home-content">
+            <div class="hero-row">
+              <div>
+                <p class="eyebrow">Focus Audio</p>
+                <h1>MuteBack</h1>
+              </div>
+              <label class="switch-only" aria-label="Enable MuteBack">
+                <input id="app-enabled" type="checkbox" />
+              </label>
             </div>
-            <span class="status-dot" id="status-dot" aria-label="Runtime status"></span>
+
+            <button type="button" class="settings-link" id="open-settings">
+              <span aria-hidden="true">&#9881;</span>
+              Settings
+            </button>
           </div>
-
-          <label class="power-control">
-            <span>
-              <strong>Active</strong>
-              <small>Lower background audio while speaking</small>
-            </span>
-            <input id="app-enabled" type="checkbox" />
-          </label>
-
-          <button type="button" class="settings-link" id="open-settings">Settings</button>
-        </header>
+        </div>
       </section>
 
       <section class="settings-page" id="settings-page" hidden>
-        <header class="page-header">
-          <div>
-            <p class="eyebrow">Controls</p>
-            <h2 id="settings-title">Settings</h2>
-          </div>
-          <button type="button" class="close-button" id="close-settings">Back</button>
-        </header>
+        <div class="window-frame settings-frame">
+          <div class="settings-scroll">
+            <header class="page-header">
+              <button type="button" class="back-button" id="close-settings" aria-label="Back">
+                &lsaquo;
+              </button>
+              <div>
+                <p class="eyebrow">Controls</p>
+                <h2 id="settings-title">Settings</h2>
+              </div>
+            </header>
 
-        <section class="settings-card">
-          <label>
-            <span>Microphone</span>
-            <select id="microphone-select"></select>
-          </label>
-        </section>
-
-        <section class="settings-card">
-          <div class="quick-row">
-            <div>
-              <h3>Ducking Level</h3>
-              <p>Background volume while speaking</p>
+            <div class="settings-section">
+              <p class="section-label">Input</p>
+              <section class="settings-card input-card">
+                <span>Microphone</span>
+                <select id="microphone-select"></select>
+              </section>
             </div>
-            <output class="meter-value" id="duck-level-value">10%</output>
-          </div>
-          <input id="duck-level" class="range" type="range" min="0" max="100" step="1" />
-          <div class="track">
-            <span class="track-label">Background</span>
-            <div class="track-bar">
-              <div class="track-fill" id="preview-fill"></div>
+
+            <div class="settings-section">
+              <p class="section-label">Ducking</p>
+              <section class="settings-card ducking-card">
+                <div class="quick-row">
+                  <div>
+                    <h3>Level</h3>
+                    <p>Background volume while speaking</p>
+                  </div>
+                  <output class="meter-value" id="duck-level-value">10%</output>
+                </div>
+                <input id="duck-level" class="range" type="range" min="0" max="100" step="1" />
+              </section>
             </div>
-          </div>
-        </section>
 
-        <section class="settings-card">
-          <div class="setting-row">
-            <div>
-              <h3>Transition</h3>
-              <p>Background audio movement</p>
+            <div class="settings-section">
+              <p class="section-label">Transition</p>
+              <section class="settings-card transition-card">
+                <div class="setting-row">
+                  <div>
+                    <h3>Mode</h3>
+                    <p>Background audio movement</p>
+                  </div>
+                  <div class="segmented" role="group" aria-label="Transition">
+                    <button type="button" class="segment" data-transition="smooth">Smooth</button>
+                    <button type="button" class="segment" data-transition="instant">Instant</button>
+                  </div>
+                </div>
+
+                <div class="timing-grid" id="timing-grid">
+                  <label>
+                    <span>Fade Down</span>
+                    <input id="duck-fade-ms" type="number" min="0" max="2000" step="10" />
+                  </label>
+                  <label>
+                    <span>Fade Up</span>
+                    <input id="restore-fade-ms" type="number" min="0" max="3000" step="10" />
+                  </label>
+                </div>
+
+                <label class="toggle-row">
+                  <span>
+                    <strong>Manual Restore</strong>
+                    <small>Keep audio low until I press restore</small>
+                  </span>
+                  <input id="manual-restore" type="checkbox" />
+                </label>
+              </section>
             </div>
-            <div class="segmented" role="group" aria-label="Transition">
-              <button type="button" class="segment" data-transition="smooth">Smooth</button>
-              <button type="button" class="segment" data-transition="instant">Instant</button>
+
+            <div class="settings-summary" hidden>
+              <div>
+                <span>Restore</span>
+                <strong id="restore-mode-label">Automatic</strong>
+              </div>
+              <div>
+                <span>Voice Match</span>
+                <strong id="voice-match-label">Off</strong>
+              </div>
+              <div>
+                <span>Microphone</span>
+                <strong id="microphone-label">Default</strong>
+              </div>
             </div>
-          </div>
-
-          <div class="timing-grid" id="timing-grid">
-            <label>
-              <span>Fade Down</span>
-              <input id="duck-fade-ms" type="number" min="0" max="2000" step="10" />
-            </label>
-            <label>
-              <span>Fade Up</span>
-              <input id="restore-fade-ms" type="number" min="0" max="3000" step="10" />
-            </label>
-          </div>
-
-          <label class="toggle-row">
-            <span>
-              <strong>Manual Restore</strong>
-              <small>Keep audio low until I press restore</small>
-            </span>
-            <input id="manual-restore" type="checkbox" />
-          </label>
-        </section>
-
-        <section class="settings-card enrollment">
-          <div class="setting-row">
-            <div>
-              <h3>Voice Match</h3>
-              <p>Optional voice enrollment</p>
-            </div>
-            <label class="switch">
-              <span>Enable</span>
-              <input id="voice-match-enabled" type="checkbox" />
-            </label>
-          </div>
-
-          <div class="phrase-card">
-            <span class="phrase-step" id="phrase-step">Sample 1 of 3</span>
-            <p id="phrase-text">Today I want my music to move out of the way when I speak.</p>
-          </div>
-
-          <div class="enrollment-actions">
-            <button type="button" class="primary-button" id="record-voice">Record Sample</button>
-            <button type="button" class="secondary-button" id="reset-voice">Reset</button>
-          </div>
-          <div class="sample-list" id="voice-samples"></div>
-          <div class="progress-row" id="voice-progress"></div>
-        </section>
-
-        <div class="settings-summary">
-          <div>
-            <span>Restore</span>
-            <strong id="restore-mode-label">Automatic</strong>
-          </div>
-          <div>
-            <span>Voice Match</span>
-            <strong id="voice-match-label">Off</strong>
-          </div>
-          <div>
-            <span>Microphone</span>
-            <strong id="microphone-label">Default</strong>
           </div>
         </div>
-
-        <div class="save-status" id="save-status">Ready</div>
       </section>
     </main>
 

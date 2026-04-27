@@ -293,10 +293,18 @@ mod windows_runtime {
         while let Ok(command) = command_rx.try_recv() {
             match command {
                 RuntimeCommand::UpdateConfig(next_config) => {
+                    let enabling_voice_match = active_speaker_profile(config).is_none()
+                        && active_speaker_profile(&next_config).is_some();
                     *config = next_config.clone();
                     app.vad_mut()
                         .set_profile(active_speaker_profile(&next_config));
                     app.set_config(next_config);
+
+                    if enabling_voice_match {
+                        if let Some(action) = app.force_restore()? {
+                            apply_action(ducker, config, action, event_tx)?;
+                        }
+                    }
                 }
                 RuntimeCommand::Restore => {
                     if let Some(action) = app.force_restore()? {
