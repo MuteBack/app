@@ -2,27 +2,48 @@
 param(
     [string]$Bundles = "nsis",
     [string]$DistDir,
+    [switch]$SkipBuild,
     [switch]$SkipTauriCliInstall
 )
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
 
-if (-not $IsWindows) {
+$isWindowsPlatform = if (Get-Variable -Name IsWindows -ErrorAction SilentlyContinue) {
+    $IsWindows
+} else {
+    $env:OS -eq "Windows_NT"
+}
+
+if (-not $isWindowsPlatform) {
     throw "Windows packaging must run on Windows because the NSIS installer target is Windows-only."
+}
+
+function Test-TauriCliInstalled {
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & cargo tauri --version *> $null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $exitCode -eq 0
 }
 
 Ensure-MuteBackNativeAssets
 Set-MuteBackNativeEnv
 
-if (-not $SkipTauriCliInstall) {
-    & cargo tauri --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Invoke-CheckedCommand cargo install tauri-cli --version "^2" --locked
+if (-not $SkipBuild) {
+    if (-not $SkipTauriCliInstall) {
+        if (-not (Test-TauriCliInstalled)) {
+            Invoke-CheckedCommand cargo install tauri-cli --version "^2" --locked
+        }
     }
-}
 
-Invoke-CheckedCommand cargo tauri build --bundles $Bundles
+    Invoke-CheckedCommand cargo tauri build --bundles $Bundles
+}
 
 $knownBundleDirs = @(
     (Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"),

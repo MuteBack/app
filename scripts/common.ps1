@@ -102,8 +102,16 @@ function Invoke-CheckedCommand {
     )
 
     Write-Host "+ $Command $($Arguments -join ' ')"
-    & $Command @Arguments
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command @Arguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($exitCode -ne 0) {
+        exit $exitCode
     }
 }
