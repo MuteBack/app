@@ -23,6 +23,7 @@ pub struct SessionInput {
     pub vad: VadDecision,
     pub hotkey_pressed: bool,
     pub explicit_stop: bool,
+    pub output_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +80,7 @@ impl SessionController {
             self.silence_accumulator = Duration::ZERO;
             self.hold_accumulator = Duration::ZERO;
             self.state = SessionState::Talking;
-            return self.duck_if_needed();
+            return self.duck_if_needed(input.output_active);
         }
 
         if self.previous_hotkey_pressed {
@@ -93,12 +94,22 @@ impl SessionController {
             }
         }
 
-        match self.state {
+        let update = match self.state {
             SessionState::Idle => self.update_idle(input),
             SessionState::Talking => self.update_talking(input),
             SessionState::Hold => self.update_hold(input),
             SessionState::AwaitingManualRestore => self.update_manual_restore(input),
+        };
+
+        if update.action.is_none()
+            && input.output_active
+            && !self.ducked
+            && matches!(self.state, SessionState::Talking | SessionState::Hold)
+        {
+            return self.duck_if_needed(input.output_active);
         }
+
+        update
     }
 
     fn update_idle(&mut self, input: SessionInput) -> SessionUpdate {
@@ -109,7 +120,7 @@ impl SessionController {
                 self.state = SessionState::Talking;
                 self.silence_accumulator = Duration::ZERO;
                 self.hold_accumulator = Duration::ZERO;
-                return self.duck_if_needed();
+                return self.duck_if_needed(input.output_active);
             }
         } else {
             self.speech_accumulator = Duration::ZERO;
@@ -145,7 +156,7 @@ impl SessionController {
         self.hold_accumulator += input.elapsed;
 
         if self.hold_accumulator >= self.active_hold_timeout {
-            if self.config.manual_restore {
+            if self.config.manual_restore && self.ducked {
                 self.state = SessionState::AwaitingManualRestore;
                 return self.snapshot(None);
             }
@@ -175,8 +186,8 @@ impl SessionController {
         self.hold_accumulator = Duration::ZERO;
     }
 
-    fn duck_if_needed(&mut self) -> SessionUpdate {
-        let action = if self.ducked {
+    fn duck_if_needed(&mut self, output_active: bool) -> SessionUpdate {
+        let action = if self.ducked || !output_active {
             None
         } else {
             self.ducked = true;
@@ -230,6 +241,14 @@ mod tests {
             vad,
             hotkey_pressed: false,
             explicit_stop: false,
+            output_active: true,
+        }
+    }
+
+    fn input_with_output(elapsed_ms: u64, vad: VadDecision, output_active: bool) -> SessionInput {
+        SessionInput {
+            output_active,
+            ..input(elapsed_ms, vad)
         }
     }
 
@@ -276,6 +295,7 @@ mod tests {
             vad: VadDecision::Silence,
             hotkey_pressed: true,
             explicit_stop: false,
+            output_active: true,
         });
         assert_eq!(update.action, Some(SessionAction::Duck));
         assert_eq!(update.state, SessionState::Talking);
@@ -285,6 +305,7 @@ mod tests {
             vad: VadDecision::Silence,
             hotkey_pressed: false,
             explicit_stop: false,
+            output_active: true,
         });
         assert_eq!(update.action, None);
         assert_eq!(update.state, SessionState::Hold);
@@ -304,6 +325,7 @@ mod tests {
             vad: VadDecision::Silence,
             hotkey_pressed: false,
             explicit_stop: true,
+            output_active: true,
         });
 
         assert_eq!(update.action, Some(SessionAction::Restore));
@@ -328,8 +350,46 @@ mod tests {
             vad: VadDecision::Silence,
             hotkey_pressed: false,
             explicit_stop: true,
+            output_active: true,
         });
         assert_eq!(update.action, Some(SessionAction::Restore));
+        assert_eq!(update.state, SessionState::Idle);
+    }
+
+    #[test]
+    fn confirmed_speech_without_output_does_not_duck() {
+        let mut controller = SessionController::new(AppConfig::default());
+
+        controller.update(input_with_output(150, VadDecision::Speech, false));
+        let update = controller.update(input_with_output(150, VadDecision::Speech, false));
+
+        assert_eq!(update.action, None);
+        assert_eq!(update.state, SessionState::Talking);
+    }
+
+    #[test]
+    fn active_output_while_talking_triggers_duck() {
+        let mut controller = SessionController::new(AppConfig::default());
+
+        controller.update(input_with_output(150, VadDecision::Speech, false));
+        controller.update(input_with_output(150, VadDecision::Speech, false));
+        let update = controller.update(input_with_output(32, VadDecision::Speech, true));
+
+        assert_eq!(update.action, Some(SessionAction::Duck));
+        assert_eq!(update.state, SessionState::Talking);
+    }
+
+    #[test]
+    fn manual_restore_does_not_wait_when_nothing_was_ducked() {
+        let mut config = AppConfig::default();
+        config.manual_restore = true;
+        let mut controller = SessionController::new(config);
+
+        controller.update(input_with_output(300, VadDecision::Speech, false));
+        controller.update(input_with_output(500, VadDecision::Silence, false));
+
+        let update = controller.update(input_with_output(5_000, VadDecision::Silence, false));
+        assert_eq!(update.action, None);
         assert_eq!(update.state, SessionState::Idle);
     }
 }

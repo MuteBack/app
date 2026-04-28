@@ -10,6 +10,7 @@ pub struct AudioTick {
     pub elapsed: Duration,
     pub hotkey_pressed: bool,
     pub explicit_stop: bool,
+    pub output_active: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +50,7 @@ where
             vad,
             hotkey_pressed: tick.hotkey_pressed,
             explicit_stop: tick.explicit_stop,
+            output_active: tick.output_active,
         });
 
         match update.action {
@@ -75,6 +77,7 @@ where
             vad: VadDecision::Silence,
             hotkey_pressed: false,
             explicit_stop: true,
+            output_active: true,
         });
 
         if let Some(SessionAction::Restore) = update.action {
@@ -114,7 +117,8 @@ mod tests {
     use crate::ducking::{AppliedDucking, NoopDucker};
     use crate::session::SessionAction;
     use crate::vad::{
-        NearFieldVad, ReferenceRejectingVad, SharedReferenceAudio, VadDecision, VadEngine,
+        NearFieldVad, ReferenceAudioConfig, ReferenceRejectingVad, SharedReferenceAudio,
+        VadDecision, VadEngine,
     };
 
     struct SequenceVad {
@@ -177,6 +181,7 @@ mod tests {
         let calibration_frames = 24;
         let total_frames = calibration_frames + scenario.frames;
         let reference = SharedReferenceAudio::new();
+        let reference_config = ReferenceAudioConfig::default();
         let inner = SequenceVad::new(vec![VadDecision::Speech; total_frames]);
         let near_field = NearFieldVad::new(inner, frame_duration);
         let vad = ReferenceRejectingVad::new(near_field, reference.clone());
@@ -185,6 +190,7 @@ mod tests {
             elapsed: frame_duration,
             hotkey_pressed: false,
             explicit_stop: false,
+            output_active: false,
         };
         let silence = constant_frame(0.0);
         let mut duck_actions = 0;
@@ -197,6 +203,9 @@ mod tests {
 
         for frame_index in 0..scenario.frames {
             reference.update_rms(scenario.reference_rms);
+            let output_active = reference
+                .snapshot()
+                .is_some_and(|snapshot| snapshot.is_active(&reference_config));
 
             let bleed_rms = scenario.reference_rms * scenario.bleed_ratio;
             let speech_rms = scenario
@@ -205,7 +214,15 @@ mod tests {
                 .map(|_| scenario.speech_rms)
                 .unwrap_or(0.0);
             let mic_frame = constant_frame(combined_rms(bleed_rms, speech_rms));
-            let update = app.process_audio_frame(&mic_frame, tick).unwrap();
+            let update = app
+                .process_audio_frame(
+                    &mic_frame,
+                    AudioTick {
+                        output_active,
+                        ..tick
+                    },
+                )
+                .unwrap();
 
             if update.action == Some(SessionAction::Duck) {
                 duck_actions += 1;
@@ -243,6 +260,7 @@ mod tests {
             elapsed: Duration::from_millis(150),
             hotkey_pressed: false,
             explicit_stop: false,
+            output_active: true,
         };
 
         let _ = app.process_audio_frame(&[100; 320], tick).unwrap();
@@ -267,6 +285,26 @@ mod tests {
             .unwrap();
 
         let (_, ducker) = app.into_parts();
+        assert_eq!(ducker.current(), AppliedDucking::Restored);
+    }
+
+    #[test]
+    fn app_does_not_apply_duck_without_active_output() {
+        let vad = SequenceVad::new(vec![VadDecision::Speech, VadDecision::Speech]);
+        let ducker = NoopDucker::default();
+        let mut app = MuteBackApp::new(AppConfig::default(), vad, ducker);
+        let tick = AudioTick {
+            elapsed: Duration::from_millis(150),
+            hotkey_pressed: false,
+            explicit_stop: false,
+            output_active: false,
+        };
+
+        let _ = app.process_audio_frame(&[100; 320], tick).unwrap();
+        let update = app.process_audio_frame(&[100; 320], tick).unwrap();
+
+        let (_, ducker) = app.into_parts();
+        assert_eq!(update.action, None);
         assert_eq!(ducker.current(), AppliedDucking::Restored);
     }
 

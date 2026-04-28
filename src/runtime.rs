@@ -19,7 +19,10 @@ mod windows_runtime {
     use crate::platform::windows::EndpointDucker;
     use crate::session::SessionAction;
     use crate::speaker::{OnnxSpeakerEmbeddingEngine, SpeakerVerifiedVad};
-    use crate::vad::{NearFieldVad, ReferenceRejectingVad, SharedReferenceAudio, SileroVadEngine};
+    use crate::vad::{
+        NearFieldVad, ReferenceAudioConfig, ReferenceRejectingVad, SharedReferenceAudio,
+        SileroVadEngine,
+    };
 
     type RuntimeVad = SpeakerVerifiedVad<
         ReferenceRejectingVad<NearFieldVad<SileroVadEngine>>,
@@ -50,6 +53,9 @@ mod windows_runtime {
         Error(String),
         Stopped,
     }
+
+    const REFERENCE_AUDIO_UNAVAILABLE: &str =
+        "reference audio unavailable; output-aware ducking and loopback rejection are disabled";
 
     #[derive(Debug, Clone)]
     pub struct RuntimeError(String);
@@ -186,26 +192,28 @@ mod windows_runtime {
         stream.play()?;
 
         let reference_audio = SharedReferenceAudio::new();
+        let output_activity = reference_audio.clone();
+        let output_activity_config = ReferenceAudioConfig::default();
         let reference_stream =
             match build_reference_stream(&host, reference_audio.clone(), error_tx.clone()) {
                 Ok(Some(stream)) => match stream.play() {
                     Ok(()) => Some(stream),
                     Err(error) => {
                         let _ = event_tx.send(RuntimeEvent::Warning(format!(
-                            "reference audio unavailable; loopback rejection is disabled: {error}"
+                            "{REFERENCE_AUDIO_UNAVAILABLE}: {error}"
                         )));
                         None
                     }
                 },
                 Ok(None) => {
                     let _ = event_tx.send(RuntimeEvent::Warning(
-                        "reference audio unavailable; loopback rejection is disabled".to_string(),
+                        REFERENCE_AUDIO_UNAVAILABLE.to_string(),
                     ));
                     None
                 }
                 Err(error) => {
                     let _ = event_tx.send(RuntimeEvent::Warning(format!(
-                        "reference audio unavailable; loopback rejection is disabled: {error}"
+                        "{REFERENCE_AUDIO_UNAVAILABLE}: {error}"
                     )));
                     None
                 }
@@ -262,6 +270,10 @@ mod windows_runtime {
                                 elapsed,
                                 hotkey_pressed: false,
                                 explicit_stop: false,
+                                output_active: output_is_active(
+                                    &output_activity,
+                                    &output_activity_config,
+                                ),
                             },
                         ) {
                             Ok(update) => {
@@ -357,6 +369,12 @@ mod windows_runtime {
         }
 
         Ok(())
+    }
+
+    fn output_is_active(reference: &SharedReferenceAudio, config: &ReferenceAudioConfig) -> bool {
+        reference
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.is_active(config))
     }
 
     fn active_speaker_profile(config: &AppConfig) -> Option<crate::config::SpeakerProfile> {
