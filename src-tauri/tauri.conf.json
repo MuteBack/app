@@ -3,6 +3,7 @@
   "productName": "MuteBack",
   "version": "1.0.0",
   "identifier": "com.muteback.app",
+  "mainBinaryName": "MuteBack_x64",
   "build": {
     "frontendDist": "../ui"
   },
