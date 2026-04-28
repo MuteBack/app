@@ -45,36 +45,9 @@ jobs:
         shell: pwsh
         run: choco install nsis -y --no-progress
 
-      - name: Download native assets
-        shell: pwsh
-        run: ./scripts/download-assets.ps1
-
-      - name: Configure ONNX Runtime paths
-        shell: pwsh
-        run: |
-          $ortLib = Join-Path $env:GITHUB_WORKSPACE 'assets\vendor\onnxruntime-win-x64-1.24.2\onnxruntime-win-x64-1.24.2\lib'
-          "ORT_LIB_LOCATION=$ortLib" >> $env:GITHUB_ENV
-          "ORT_DYLIB_PATH=$(Join-Path $ortLib 'onnxruntime.dll')" >> $env:GITHUB_ENV
-          "SILERO_MODEL_PATH=$(Join-Path $env:GITHUB_WORKSPACE 'assets\vendor\silero_vad.onnx')" >> $env:GITHUB_ENV
-          "SPEAKER_MODEL_PATH=$(Join-Path $env:GITHUB_WORKSPACE 'assets\vendor\voxceleb_ECAPA512_LM.onnx')" >> $env:GITHUB_ENV
-          $ortLib >> $env:GITHUB_PATH
-
-      - name: Install Tauri CLI
-        shell: pwsh
-        run: cargo install tauri-cli --version "^2" --locked
-
       - name: Build NSIS installer
         shell: pwsh
-        run: cargo tauri build --bundles nsis
-
-      - name: Create checksums
-        shell: pwsh
-        run: |
-          $bundleDir = 'src-tauri\target\release\bundle\nsis'
-          Get-ChildItem $bundleDir -Filter *.exe | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            "$hash  $($_.Name)"
-          } | Set-Content -Path (Join-Path $bundleDir 'SHA256SUMS.txt') -Encoding ascii
+        run: ./scripts/package-windows.ps1
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

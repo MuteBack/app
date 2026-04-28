@@ -4,10 +4,12 @@ MuteBack is a Rust desktop app that lowers background audio while the user is sp
 
 The first target is Windows. The design should stay cross-platform so we can add a macOS version without rewriting the core logic.
 
+Project scripts live in [scripts](scripts) and are written for PowerShell Core. Use `pwsh` on Windows, Linux, and macOS.
+
 Start here:
 
-- [MVP Design](C:\Users\marci\Documents\New project\docs\MVP.md)
-- [VAD And Ducking Options](C:\Users\marci\Documents\New project\docs\VAD_AND_DUCKING.md)
+- [MVP Design](docs/MVP.md)
+- [VAD And Ducking Options](docs/VAD_AND_DUCKING.md)
 
 ## Try The Console Prototype
 
@@ -21,7 +23,7 @@ The current console prototype is Windows-only.
 
 Run it with:
 
-- `.\run-console.bat`
+- `pwsh ./scripts/run.ps1 -Console`
 
 Default settings:
 
@@ -29,24 +31,24 @@ Default settings:
 - `180 ms` fade down
 - `260 ms` restore fade
 
-Useful test commands:
+Useful script commands:
 
-- `.\run-console.bat --transition instant`
-- `.\run-console.bat --duck-level 0`
-- `.\run-console.bat --restore-mode manual`
-- `.\run-console.bat --duck-level 20 --duck-fade-ms 300 --restore-fade-ms 450`
+- `pwsh ./scripts/download-assets.ps1`
+- `pwsh ./scripts/ci-check.ps1`
+- `pwsh ./scripts/bump-version.ps1 0.1.2`
+- `pwsh ./scripts/package-windows.ps1`
 
 After the first build, you can also run the compiled binary directly:
 
 - `.\target\debug\muteback.exe`
 
-The local Windows setup expects the Silero model, WeSpeaker speaker embedding model, and ONNX Runtime files in [assets/vendor](C:\Users\marci\Documents\New project\assets\vendor). `run-console.bat` sets the required environment variables and PATH entries for you.
+The local setup expects the Silero model, WeSpeaker speaker embedding model, and ONNX Runtime files in [assets/vendor](assets/vendor). `scripts/run.ps1`, `scripts/ci-check.ps1`, and `scripts/package-windows.ps1` set the required environment variables and PATH entries for you.
 
 On a fresh checkout, download the local model/runtime assets with:
 
-- `.\download-assets.bat`
+- `pwsh ./scripts/download-assets.ps1`
 
-The run scripts also call this downloader automatically if a required asset is missing.
+The run, check, and package scripts also call this downloader automatically if a required asset is missing.
 
 ## Try The MuteBack GUI
 
@@ -54,7 +56,7 @@ Tauri supports tray apps on Windows and macOS. The GUI is now the main app entry
 
 Run it with:
 
-- `.\run-gui.bat`
+- `pwsh ./scripts/run.ps1`
 
 Current GUI status:
 

@@ -6,10 +6,11 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$VendorDir = Join-Path $RepoRoot "assets\vendor"
-$OnnxRuntimeVersion = "1.24.2"
-$OnnxRuntimeFolder = "onnxruntime-win-x64-$OnnxRuntimeVersion"
+. (Join-Path $PSScriptRoot "common.ps1")
+
+$VendorDir = Get-VendorDir
+$OnnxRuntimeVersion = $script:OnnxRuntimeVersion
+$OnnxRuntimeFolder = $script:OnnxRuntimeFolder
 
 New-Item -ItemType Directory -Path $VendorDir -Force | Out-Null
 
@@ -17,13 +18,13 @@ $Assets = @(
     @{
         Name = "Silero VAD ONNX"
         Url = "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
-        Path = Join-Path $VendorDir "silero_vad.onnx"
+        Path = Get-SileroModelPath
         Sha256 = "1A153A22F4509E292A94E67D6F9B85E8DEB25B4988682B7E174C65279D8788E3"
     },
     @{
         Name = "WeSpeaker ECAPA speaker embedding ONNX"
         Url = "https://huggingface.co/Wespeaker/wespeaker-ecapa-tdnn512-LM/resolve/main/voxceleb_ECAPA512_LM.onnx?download=true"
-        Path = Join-Path $VendorDir "voxceleb_ECAPA512_LM.onnx"
+        Path = Get-SpeakerModelPath
         Sha256 = "D71B85D9B48058EF68004F04F1B78ACEBEFB9DFCF542E19B976A12A5AD1F10B0"
     },
     @{
@@ -76,7 +77,7 @@ function Save-Asset($Asset) {
 function Expand-OnnxRuntime {
     $zipPath = Join-Path $VendorDir "onnxruntime-win-x64-$OnnxRuntimeVersion.zip"
     $extractRoot = Join-Path $VendorDir $OnnxRuntimeFolder
-    $dllPath = Join-Path $extractRoot "$OnnxRuntimeFolder\lib\onnxruntime.dll"
+    $dllPath = Get-OnnxRuntimeDllPath
 
     if (-not $Force -and (Test-Path -LiteralPath $dllPath)) {
         Write-Host "OK   ONNX Runtime extracted"
