@@ -48,33 +48,9 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: ./scripts/package-windows.ps1
-
-      - name: Validate package files
-        shell: pwsh
         run: |
           $distDir = Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"
-
-          if (-not (Test-Path -LiteralPath $distDir)) {
-            Write-Host "Expected package directory was not created: $distDir"
-            Write-Host "Bundle outputs found under target directories:"
-            Get-ChildItem -Path "target", "src-tauri/target" -Recurse -File -ErrorAction SilentlyContinue |
-              Where-Object { $_.FullName -match "\\bundle\\" } |
-              Select-Object FullName, Length |
-              Format-Table -AutoSize
-            throw "Expected package directory was not created: $distDir"
-          }
-
-          $files = Get-ChildItem -LiteralPath $distDir -File
-          $files | Format-Table -AutoSize
-
-          if (-not ($files | Where-Object { $_.Extension -ieq ".exe" })) {
-            throw "No .exe installer found in $distDir"
-          }
-
-          if (-not (Test-Path -LiteralPath (Join-Path $distDir "SHA256SUMS.txt"))) {
-            throw "Missing SHA256SUMS.txt in $distDir"
-          }
+          ./scripts/package-windows.ps1 -DistDir $distDir
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

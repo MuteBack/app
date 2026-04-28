@@ -27,6 +27,39 @@ if (-not $DistDir) {
 
 Write-Host "Windows package output directory: $DistDir"
 
+function Get-NsisBundleDirs {
+    $knownBundleDirs = @(
+        (Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"),
+        (Get-RepoPath "target" "release" "bundle" "nsis")
+    )
+
+    $bundleRoots = @(
+        (Get-RepoPath "src-tauri" "target"),
+        (Get-RepoPath "target")
+    )
+
+    $discoveredBundleDirs = foreach ($bundleRoot in $bundleRoots) {
+        if (Test-Path -LiteralPath $bundleRoot) {
+            Get-ChildItem -LiteralPath $bundleRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq "nsis" -and $_.Parent.Name -eq "bundle" } |
+                ForEach-Object { $_.FullName }
+        }
+    }
+
+    @($knownBundleDirs + $discoveredBundleDirs) |
+        Where-Object { $_ } |
+        Select-Object -Unique
+}
+
+function Clear-NsisBundleDirs {
+    foreach ($bundleDir in Get-NsisBundleDirs) {
+        if (Test-Path -LiteralPath $bundleDir) {
+            Write-Host "Removing stale NSIS bundle directory: $bundleDir"
+            Remove-Item -LiteralPath $bundleDir -Recurse -Force
+        }
+    }
+}
+
 function Test-TauriCliInstalled {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -44,6 +77,8 @@ Ensure-MuteBackNativeAssets
 Set-MuteBackNativeEnv
 
 if (-not $SkipBuild) {
+    Clear-NsisBundleDirs
+
     if (-not $SkipTauriCliInstall) {
         if (-not (Test-TauriCliInstalled)) {
             Invoke-CheckedCommand cargo install tauri-cli --version "^2" --locked
@@ -53,27 +88,7 @@ if (-not $SkipBuild) {
     Invoke-CheckedCommand cargo tauri build --bundles $Bundles
 }
 
-$knownBundleDirs = @(
-    (Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"),
-    (Get-RepoPath "target" "release" "bundle" "nsis")
-)
-
-$bundleRoots = @(
-    (Get-RepoPath "src-tauri" "target"),
-    (Get-RepoPath "target")
-)
-
-$discoveredBundleDirs = foreach ($bundleRoot in $bundleRoots) {
-    if (Test-Path -LiteralPath $bundleRoot) {
-        Get-ChildItem -LiteralPath $bundleRoot -Directory -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq "nsis" -and $_.Parent.Name -eq "bundle" } |
-            ForEach-Object { $_.FullName }
-    }
-}
-
-$candidateBundleDirs = @($knownBundleDirs + $discoveredBundleDirs) |
-    Where-Object { $_ } |
-    Select-Object -Unique
+$candidateBundleDirs = @(Get-NsisBundleDirs)
 
 $installers = @()
 foreach ($bundleDir in $candidateBundleDirs) {
@@ -103,9 +118,25 @@ $checksums = $stagedInstallers | ForEach-Object {
 
 $checksumsPath = Join-Path $DistDir "SHA256SUMS.txt"
 [System.IO.File]::WriteAllLines($checksumsPath, $checksums, [System.Text.Encoding]::ASCII)
+
+if (-not (Test-Path -LiteralPath $DistDir -PathType Container)) {
+    throw "Expected package directory was not created: $DistDir"
+}
+
+$packageFiles = @(Get-ChildItem -LiteralPath $DistDir -File)
+if (-not ($packageFiles | Where-Object { $_.Extension -ieq ".exe" })) {
+    throw "No .exe installer found in $DistDir"
+}
+
+if (-not (Test-Path -LiteralPath $checksumsPath -PathType Leaf)) {
+    throw "Missing SHA256SUMS.txt in $DistDir"
+}
+
 Write-Host "Staged Windows package files in $DistDir"
 Write-Host "Wrote $checksumsPath"
 
-Get-ChildItem -LiteralPath $DistDir -File | ForEach-Object {
+$packageFiles | Format-Table -AutoSize
+
+$packageFiles | ForEach-Object {
     Write-Host " - $($_.FullName)"
 }
