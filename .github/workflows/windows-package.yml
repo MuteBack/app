@@ -18,6 +18,10 @@ jobs:
   package-windows:
     name: Build Windows Package
     runs-on: windows-latest
+    
+    environment:
+      name: package-windows
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       # Repository setup
