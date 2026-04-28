@@ -16,20 +16,20 @@ env:
 
 jobs:
   package-windows:
-    name: Build Windows package
+    name: Build Windows Package
     runs-on: windows-latest
 
     steps:
+      # Repository setup
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        shell: pwsh
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+      # Rust toolchain setup
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo files
+      # Dependency caching for faster builds
+      - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -38,16 +38,21 @@ jobs:
             target
             src-tauri/target
           key: windows-cargo-${{ hashFiles('Cargo.lock', 'src-tauri/Cargo.lock') }}
-          restore-keys: |
-            windows-cargo-
+          restore-keys: windows-cargo-
 
-      - name: Prepare native assets
+      # Download and configure native assets (models, ONNX runtime)
+      - name: Download native assets
+        shell: pwsh
+        run: ./scripts/download-assets.ps1
+
+      # Set up environment variables for build
+      - name: Configure build environment
         shell: pwsh
         run: |
-          ./scripts/download-assets.ps1
           . ./scripts/common.ps1
           Set-MuteBackNativeEnv
-
+          
+          # Export environment variables for subsequent steps
           @(
             "SILERO_MODEL_PATH=$env:SILERO_MODEL_PATH"
             "SPEAKER_MODEL_PATH=$env:SPEAKER_MODEL_PATH"
@@ -56,17 +61,18 @@ jobs:
             "ORT_PREFER_DYNAMIC_LINK=$env:ORT_PREFER_DYNAMIC_LINK"
             "ORT_SKIP_DOWNLOAD=$env:ORT_SKIP_DOWNLOAD"
           ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
+          
           Get-OnnxRuntimeLibDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      - name: Clear stale Tauri bundles
+      # Clean up old bundles to ensure fresh build
+      - name: Clean previous build artifacts
         shell: pwsh
         run: |
           Remove-Item -LiteralPath "target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
 
-      - name: Build Windows package artifact
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      # Build and release based on trigger type
+      - name: Build and publish release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -74,24 +80,11 @@ jobs:
           projectPath: src-tauri
           args: --bundles nsis
           retryAttempts: 2
-          uploadWorkflowArtifacts: true
+          uploadWorkflowArtifacts: ${{ !startsWith(github.ref, 'refs/tags/') }}
           workflowArtifactNamePattern: MuteBack-Windows-[bundle]
           uploadUpdaterJson: false
-
-      - name: Publish draft GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: tauri-apps/tauri-action@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: src-tauri
-          args: --bundles nsis
-          retryAttempts: 2
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: MuteBack-Windows-[bundle]
-          uploadUpdaterJson: false
-          tagName: ${{ github.ref_name }}
-          releaseName: MuteBack ${{ github.ref_name }}
-          releaseBody: See the assets to download and install this Windows build.
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('MuteBack {0}', github.ref_name) || '' }}
+          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && 'See the assets to download and install this Windows build.' || '' }}
+          releaseDraft: ${{ startsWith(github.ref, 'refs/tags/') }}
+          prerelease: ${{ startsWith(github.ref, 'refs/tags/') && contains(github.ref_name, '-') || false }}
