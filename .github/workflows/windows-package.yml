@@ -44,7 +44,7 @@ jobs:
 
       - name: Install NSIS
         shell: pwsh
-        run: choco install nsis -y --no-progress
+        run: ./scripts/install-nsis.ps1
 
       - name: Build NSIS installer
         id: package
