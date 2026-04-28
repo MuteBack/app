@@ -666,11 +666,15 @@ select {
   place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: 999px;
 }
 
 .restore-icon {
-  object-fit: cover;
+  border-radius: 7px;
+  object-fit: contain;
+}
+
+.restore-stop {
+  border-radius: 999px;
 }
 
 .restore-pill small {
