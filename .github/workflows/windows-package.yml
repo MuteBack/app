@@ -52,6 +52,7 @@ jobs:
         run: |
           $distDir = [System.IO.Path]::GetFullPath((Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"))
           ./scripts/package-windows.ps1 -DistDir $distDir
+          ./scripts/stage-windows-package.ps1 -DistDir $distDir
           $distDirForActions = $distDir.Replace("\", "/")
           "dist-dir=$distDirForActions" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "WINDOWS_DIST_DIR_ABS=$distDirForActions" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
