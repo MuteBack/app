@@ -36,6 +36,12 @@ function addListener(element, eventName, handler) {
   }
 }
 
+function setSaveStatus(text) {
+  if (controls.saveStatus) {
+    controls.saveStatus.textContent = text;
+  }
+}
+
 const phrases = [
   "Today I want my music to move out of the way when I speak.",
   "This app should listen for my voice and ignore background speech.",
@@ -93,14 +99,14 @@ function render() {
 async function save(nextSettings) {
   settings = nextSettings;
   render();
-  controls.saveStatus.textContent = "Saving";
+  setSaveStatus("Saving");
 
   try {
     settings = await invoke("update_settings", { input: settings });
-    controls.saveStatus.textContent = "Saved";
+    setSaveStatus("Saved");
     render();
   } catch (error) {
-    controls.saveStatus.textContent = "Error";
+    setSaveStatus("Error");
     console.error(error);
   }
 }
@@ -110,13 +116,19 @@ async function refreshRuntimeStatus() {
     runtimeStatus = await invoke("get_runtime_status");
     renderRuntime();
   } catch (error) {
-    controls.statusDot.dataset.state = "stopped";
-    controls.statusDot.title = "Status unavailable";
+    if (controls.statusDot) {
+      controls.statusDot.dataset.state = "stopped";
+      controls.statusDot.title = "Status unavailable";
+    }
     console.error(error);
   }
 }
 
 function renderRuntime() {
+  if (!controls.statusDot) {
+    return;
+  }
+
   const state = runtimeStatus.ducked
     ? "ducked"
     : runtimeStatus.running
@@ -127,7 +139,9 @@ function renderRuntime() {
 
   controls.statusDot.dataset.state = state;
   controls.statusDot.title = statusTitle(state);
-  controls.statusDot.parentElement.dataset.state = state;
+  if (controls.statusDot.parentElement) {
+    controls.statusDot.parentElement.dataset.state = state;
+  }
   if (controls.statusText) {
     controls.statusText.textContent = statusLabel(state);
   }
@@ -298,21 +312,21 @@ async function recordVoiceSample() {
 
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!navigator.mediaDevices?.getUserMedia || !AudioContextClass) {
-    controls.saveStatus.textContent = "Mic unsupported";
+    setSaveStatus("Mic unsupported");
     return;
   }
 
   isRecording = true;
   renderEnrollment();
-  controls.saveStatus.textContent = "Listening";
+  setSaveStatus("Listening");
 
   const startedAt = performance.now();
   const captured = await capturePcmSampleUntilSilence(AudioContextClass, (status) => {
-    controls.saveStatus.textContent = status;
+    setSaveStatus(status);
   });
   const durationMs = Math.round(performance.now() - startedAt);
 
-  controls.saveStatus.textContent = "Embedding";
+  setSaveStatus("Embedding");
   enrollment = await invoke("add_voice_sample", {
     input: {
       phraseIndex: enrollment.samples.length,
@@ -324,7 +338,7 @@ async function recordVoiceSample() {
   settings = await invoke("get_settings");
 
   isRecording = false;
-  controls.saveStatus.textContent = "Saved";
+  setSaveStatus("Saved");
   render();
 }
 
@@ -476,7 +490,7 @@ function stopSamplePlayback({ renderAfter = true } = {}) {
 async function playVoiceSample(index) {
   if (activeSamplePlayback?.index === index) {
     stopSamplePlayback();
-    controls.saveStatus.textContent = "Stopped";
+    setSaveStatus("Stopped");
     return;
   }
 
@@ -484,14 +498,14 @@ async function playVoiceSample(index) {
 
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) {
-    controls.saveStatus.textContent = "Playback unsupported";
+    setSaveStatus("Playback unsupported");
     return;
   }
 
-  controls.saveStatus.textContent = "Loading sample";
+  setSaveStatus("Loading sample");
   const audio = await invoke("get_voice_sample_audio", { index });
   if (!audio.samples.length) {
-    controls.saveStatus.textContent = "No audio";
+    setSaveStatus("No audio");
     return;
   }
 
@@ -507,13 +521,13 @@ async function playVoiceSample(index) {
     if (activeSamplePlayback?.source === source) {
       activeSamplePlayback = null;
       context.close().catch(console.error);
-      controls.saveStatus.textContent = "Ready";
+      setSaveStatus("Ready");
       renderVoiceSamples();
     }
   };
 
   source.start();
-  controls.saveStatus.textContent = "Playing sample";
+  setSaveStatus("Playing sample");
   renderVoiceSamples();
 }
 
@@ -575,8 +589,7 @@ addListener(controls.recordVoice, "click", async () => {
     await recordVoiceSample();
   } catch (error) {
     isRecording = false;
-    controls.saveStatus.textContent =
-      error?.message === "No speech detected" ? "No speech" : "Mic error";
+    setSaveStatus(error?.message === "No speech detected" ? "No speech" : "Mic error");
     renderEnrollment();
     console.error(error);
   }
@@ -586,7 +599,7 @@ addListener(controls.resetVoice, "click", async () => {
   stopSamplePlayback({ renderAfter: false });
   enrollment = await invoke("reset_voice_enrollment");
   settings = await invoke("get_settings");
-  controls.saveStatus.textContent = "Reset";
+  setSaveStatus("Reset");
   render();
 });
 
@@ -596,7 +609,7 @@ addListener(controls.voiceSamples, "click", async (event) => {
     try {
       await playVoiceSample(Number(play.dataset.playSample));
     } catch (error) {
-      controls.saveStatus.textContent = "Playback error";
+      setSaveStatus("Playback error");
       renderVoiceSamples();
       console.error(error);
     }
@@ -613,7 +626,7 @@ addListener(controls.voiceSamples, "click", async (event) => {
     index: Number(remove.dataset.removeSample),
   });
   settings = await invoke("get_settings");
-  controls.saveStatus.textContent = "Removed";
+  setSaveStatus("Removed");
   render();
 });
 

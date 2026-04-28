@@ -12,6 +12,7 @@ use muteback::speaker::{
 use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{Menu, MenuItem},
+    path::BaseDirectory,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent,
@@ -20,15 +21,18 @@ use tauri_plugin_store::StoreExt;
 
 const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/tray.png");
 const TRAY_ID: &str = "main-tray";
-const MAIN_HOME_SIZE: (f64, f64) = (280.0, 255.0);
-const MAIN_SETTINGS_SIZE: (f64, f64) = (322.0, 542.0);
-const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (322.0, 520.0);
+const MAIN_HOME_SIZE: (f64, f64) = (280.0, 190.0);
+const MAIN_SETTINGS_SIZE: (f64, f64) = (322.0, 660.0);
+const MAIN_SETTINGS_MIN_SIZE: (f64, f64) = (322.0, 630.0);
 const RESTORE_WINDOW_LABEL: &str = "restore_prompt";
 const RESTORE_WINDOW_SIZE: (f64, f64) = (216.0, 52.0);
 const MAIN_RESIZE_STEPS: u32 = 14;
 const MAIN_RESIZE_FRAME_MS: u64 = 12;
 const SETTINGS_STORE_PATH: &str = "settings.store.json";
 const SETTINGS_STORE_KEY: &str = "settings";
+const SILERO_RESOURCE_PATH: &str = "assets/vendor/silero_vad.onnx";
+const SPEAKER_RESOURCE_PATH: &str = "assets/vendor/voxceleb_ECAPA512_LM.onnx";
+const ONNX_RUNTIME_RESOURCE_PATH: &str = "assets/vendor/onnxruntime.dll";
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -987,6 +991,28 @@ fn push_voice_profile_path(paths: &mut Vec<PathBuf>, directory: PathBuf) {
     }
 }
 
+fn configure_bundled_asset_env(app: &AppHandle) {
+    set_env_from_resource(app, "SILERO_MODEL_PATH", SILERO_RESOURCE_PATH);
+    set_env_from_resource(app, "SPEAKER_MODEL_PATH", SPEAKER_RESOURCE_PATH);
+    set_env_from_resource(app, "ORT_DYLIB_PATH", ONNX_RUNTIME_RESOURCE_PATH);
+}
+
+fn set_env_from_resource(app: &AppHandle, key: &str, resource_path: &str) {
+    if std::env::var_os(key).is_some() {
+        return;
+    }
+
+    if let Some(path) = bundled_resource_path(app, resource_path).filter(|path| path.exists()) {
+        std::env::set_var(key, path);
+    }
+}
+
+fn bundled_resource_path(app: &AppHandle, resource_path: &str) -> Option<PathBuf> {
+    app.path()
+        .resolve(resource_path, BaseDirectory::Resource)
+        .ok()
+}
+
 fn update_runtime_message(state: &AppState, message: &str) {
     set_runtime_status(state, |status| {
         status.message = message.to_string();
@@ -1333,6 +1359,7 @@ fn main() {
             start_restore_prompt_drag
         ])
         .setup(|app| {
+            configure_bundled_asset_env(app.handle());
             app.handle()
                 .plugin(tauri_plugin_store::Builder::default().build())
                 .map_err(|error| format!("failed to register store plugin: {error}"))?;

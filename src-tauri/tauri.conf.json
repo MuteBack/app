@@ -34,6 +34,14 @@
     }
   },
   "bundle": {
-    "active": false
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../assets/vendor/silero_vad.onnx": "assets/vendor/silero_vad.onnx",
+      "../assets/vendor/voxceleb_ECAPA512_LM.onnx": "assets/vendor/voxceleb_ECAPA512_LM.onnx",
+      "../assets/vendor/onnxruntime-win-x64-1.24.2/onnxruntime-win-x64-1.24.2/lib/onnxruntime.dll": "assets/vendor/onnxruntime.dll",
+      "../assets/vendor/onnxruntime-win-x64-1.24.2/onnxruntime-win-x64-1.24.2/lib/onnxruntime_providers_shared.dll": "assets/vendor/onnxruntime_providers_shared.dll"
+    }
   }
 }

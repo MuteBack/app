@@ -111,7 +111,7 @@ small {
 
 .home-content {
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto 1fr auto;
   gap: 15px;
   align-content: start;
   min-height: 100%;
@@ -275,6 +275,7 @@ h3 {
 }
 
 .settings-link {
+  grid-row: 3;
   align-self: end;
   display: inline-flex;
   align-items: center;
@@ -358,6 +359,14 @@ h3 {
   padding: 11px;
 }
 
+.manual-restore-card {
+  border-color: #d9e5de;
+}
+
+.manual-restore-card .toggle-row {
+  min-height: 42px;
+}
+
 .input-card {
   min-height: 47px;
   color: #151512;
@@ -407,8 +416,7 @@ h3 {
   display: none;
 }
 
-.transition-card > .setting-row,
-.transition-card > .timing-grid {
+.transition-card > .setting-row {
   padding-bottom: 11px;
   border-bottom: 1px solid #e8e4df;
 }
@@ -442,6 +450,7 @@ h3 {
 }
 
 .timing-grid {
+  padding-bottom: 11px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
