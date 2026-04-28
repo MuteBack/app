@@ -1,0 +1,125 @@
+name: Windows Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  ORT_PREFER_DYNAMIC_LINK: "1"
+  ORT_SKIP_DOWNLOAD: "1"
+
+jobs:
+  package-windows:
+    name: Build Windows Package
+    runs-on: windows-latest
+    
+    environment:
+      name: package-windows
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      # Repository setup
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Rust toolchain setup
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Dependency caching for faster builds
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            src-tauri/target
+          key: windows-cargo-${{ hashFiles('Cargo.lock', 'src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      # Download and configure native assets (models, ONNX runtime)
+      - name: Download native assets
+        shell: pwsh
+        run: ./scripts/download-assets.ps1
+
+      # Set up environment variables for build
+      - name: Configure build environment
+        shell: pwsh
+        run: |
+          . ./scripts/common.ps1
+          Set-MuteBackNativeEnv
+          
+          # Export environment variables for subsequent steps
+          @(
+            "SILERO_MODEL_PATH=$env:SILERO_MODEL_PATH"
+            "SPEAKER_MODEL_PATH=$env:SPEAKER_MODEL_PATH"
+            "ORT_LIB_LOCATION=$env:ORT_LIB_LOCATION"
+            "ORT_DYLIB_PATH=$env:ORT_DYLIB_PATH"
+            "ORT_PREFER_DYNAMIC_LINK=$env:ORT_PREFER_DYNAMIC_LINK"
+            "ORT_SKIP_DOWNLOAD=$env:ORT_SKIP_DOWNLOAD"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          
+          Get-OnnxRuntimeLibDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # Clean up old bundles to ensure fresh build
+      - name: Clean previous build artifacts
+        shell: pwsh
+        run: |
+          Remove-Item -LiteralPath "target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Build Windows package artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          args: --bundles nsis
+          retryAttempts: 2
+          assetNamePattern: MuteBack_x64[ext]
+
+      - name: Validate updater signing secrets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $tauriConfig = Get-Content -LiteralPath "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $pubkey = $tauriConfig.plugins.updater.pubkey
+
+          if (-not $pubkey -or $pubkey -eq "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY") {
+            throw "Missing updater public key in src-tauri/tauri.conf.json. Generate an updater key with 'cargo tauri signer generate' and commit the generated public key."
+          }
+
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY secret. Generate an updater key with 'cargo tauri signer generate' and save the private key in GitHub Secrets."
+          }
+
+      - name: Publish draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: src-tauri
+          args: --bundles nsis --config tauri.updater.conf.json
+          retryAttempts: 2
+          assetNamePattern: MuteBack_x64[ext]
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          tagName: ${{ github.ref_name }}
+          releaseName: MuteBack ${{ github.ref_name }}
+          releaseBody: See the assets to download and install this Windows build.
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
