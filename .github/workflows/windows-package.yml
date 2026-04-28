@@ -71,8 +71,8 @@ jobs:
           Remove-Item -LiteralPath "target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item -LiteralPath "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
 
-      # Build and release based on trigger type
-      - name: Build and publish release
+      - name: Build Windows package artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -81,9 +81,41 @@ jobs:
           args: --bundles nsis
           retryAttempts: 2
           assetNamePattern: MuteBack_x64[ext]
-          includeUpdaterJson: false
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('MuteBack {0}', github.ref_name) || '' }}
-          releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && 'See the assets to download and install this Windows build.' || '' }}
-          releaseDraft: ${{ startsWith(github.ref, 'refs/tags/') }}
-          prerelease: ${{ startsWith(github.ref, 'refs/tags/') && contains(github.ref_name, '-') || false }}
+
+      - name: Validate updater signing secrets
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $tauriConfig = Get-Content -LiteralPath "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $pubkey = $tauriConfig.plugins.updater.pubkey
+
+          if (-not $pubkey -or $pubkey -eq "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY") {
+            throw "Missing updater public key in src-tauri/tauri.conf.json. Generate an updater key with 'cargo tauri signer generate' and commit the generated public key."
+          }
+
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Missing TAURI_SIGNING_PRIVATE_KEY secret. Generate an updater key with 'cargo tauri signer generate' and save the private key in GitHub Secrets."
+          }
+
+      - name: Publish draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: src-tauri
+          args: --bundles nsis --config tauri.updater.conf.json
+          retryAttempts: 2
+          assetNamePattern: MuteBack_x64[ext]
+          includeUpdaterJson: true
+          updaterJsonPreferNsis: true
+          tagName: ${{ github.ref_name }}
+          releaseName: MuteBack ${{ github.ref_name }}
+          releaseBody: See the assets to download and install this Windows build.
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

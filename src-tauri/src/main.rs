@@ -20,6 +20,7 @@ use tauri::{
     WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_store::StoreExt;
+use tauri_plugin_updater::UpdaterExt;
 
 const TRAY_ICON: tauri::image::Image<'_> = tauri::include_image!("./icons/tray.png");
 const TRAY_ID: &str = "main-tray";
@@ -526,12 +527,62 @@ fn start_restore_prompt_drag(window: WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn check_for_updates() -> UpdateCheckStatus {
-    UpdateCheckStatus {
-        configured: false,
-        update_available: false,
-        version: None,
-        message: "Updater is scaffolded but not configured yet.".to_string(),
+async fn check_for_updates(app: AppHandle) -> UpdateCheckStatus {
+    check_for_updates_inner(app, true).await
+}
+
+async fn check_for_updates_inner(app: AppHandle, install_update: bool) -> UpdateCheckStatus {
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            return UpdateCheckStatus {
+                configured: false,
+                update_available: false,
+                version: None,
+                message: format!("Updater is not configured: {error}"),
+            };
+        }
+    };
+
+    let update = match updater.check().await {
+        Ok(update) => update,
+        Err(error) => {
+            return UpdateCheckStatus {
+                configured: true,
+                update_available: false,
+                version: None,
+                message: format!("Update check failed: {error}"),
+            };
+        }
+    };
+
+    let Some(update) = update else {
+        return UpdateCheckStatus {
+            configured: true,
+            update_available: false,
+            version: None,
+            message: "MuteBack is up to date.".to_string(),
+        };
+    };
+
+    let version = update.version.to_string();
+    if !install_update {
+        return UpdateCheckStatus {
+            configured: true,
+            update_available: true,
+            version: Some(version),
+            message: "Update available.".to_string(),
+        };
+    }
+
+    match update.download_and_install(|_, _| {}, || {}).await {
+        Ok(()) => app.restart(),
+        Err(error) => UpdateCheckStatus {
+            configured: true,
+            update_available: true,
+            version: Some(version),
+            message: format!("Update install failed: {error}"),
+        },
     }
 }
 
@@ -1499,6 +1550,13 @@ fn main() {
             }
             let settings = normalize_saved_settings(app.handle(), &state)?;
             sync_runtime(&settings, &state, app.handle(), false)?;
+            let update_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let status = check_for_updates_inner(update_app, true).await;
+                if status.configured && status.update_available {
+                    eprintln!("{}", status.message);
+                }
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
