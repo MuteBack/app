@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Bundles = "nsis",
+    [string]$DistDir,
     [switch]$SkipTauriCliInstall
 )
 
@@ -23,18 +24,44 @@ if (-not $SkipTauriCliInstall) {
 
 Invoke-CheckedCommand cargo tauri build --bundles $Bundles
 
-$bundleDir = Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"
-$checksumsPath = Join-Path $bundleDir "SHA256SUMS.txt"
-$installers = Get-ChildItem -LiteralPath $bundleDir -Filter "*.exe"
+$candidateBundleDirs = @(
+    (Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"),
+    (Get-RepoPath "target" "release" "bundle" "nsis")
+) | Select-Object -Unique
 
-if ($installers.Count -eq 0) {
-    throw "No Windows installer was produced in $bundleDir."
+$installers = @()
+foreach ($bundleDir in $candidateBundleDirs) {
+    if (Test-Path -LiteralPath $bundleDir) {
+        $installers += Get-ChildItem -LiteralPath $bundleDir -Filter "*.exe" -File
+    }
 }
 
-$checksums = $installers | ForEach-Object {
+if ($installers.Count -eq 0) {
+    $searched = $candidateBundleDirs -join ", "
+    throw "No Windows installer was produced. Searched: $searched."
+}
+
+if (-not $DistDir) {
+    $DistDir = Get-RepoPath "dist" "windows"
+} elseif (-not [System.IO.Path]::IsPathRooted($DistDir)) {
+    $DistDir = Get-RepoPath $DistDir
+}
+
+New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
+Get-ChildItem -LiteralPath $DistDir -File | Remove-Item -Force
+
+$stagedInstallers = foreach ($installer in $installers) {
+    $targetPath = Join-Path $DistDir $installer.Name
+    Copy-Item -LiteralPath $installer.FullName -Destination $targetPath -Force
+    Get-Item -LiteralPath $targetPath
+}
+
+$checksums = $stagedInstallers | ForEach-Object {
     $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     "$hash  $($_.Name)"
 }
 
+$checksumsPath = Join-Path $DistDir "SHA256SUMS.txt"
 [System.IO.File]::WriteAllLines($checksumsPath, $checksums, [System.Text.Encoding]::ASCII)
+Write-Host "Staged Windows package files in $DistDir"
 Write-Host "Wrote $checksumsPath"

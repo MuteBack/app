@@ -5,6 +5,7 @@
 # Tauri generated bundles and installers
 /src-tauri/gen/
 /src-tauri/bundle/
+/dist/
 
 # Local model/runtime binaries are large and should be downloaded locally
 /assets/vendor/
