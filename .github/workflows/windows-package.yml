@@ -13,6 +13,7 @@ env:
   CARGO_TERM_COLOR: always
   ORT_PREFER_DYNAMIC_LINK: "1"
   ORT_SKIP_DOWNLOAD: "1"
+  WINDOWS_DIST_DIR: dist/windows
 
 jobs:
   package-windows:
@@ -47,15 +48,35 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: ./scripts/package-windows.ps1
+        run: |
+          $distDir = Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"
+          ./scripts/package-windows.ps1 -DistDir $distDir
+
+      - name: Validate package files
+        shell: pwsh
+        run: |
+          $distDir = Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"
+
+          if (-not (Test-Path -LiteralPath $distDir)) {
+            throw "Expected package directory was not created: $distDir"
+          }
+
+          $files = Get-ChildItem -LiteralPath $distDir -File
+          $files | Format-Table -AutoSize
+
+          if (-not ($files | Where-Object { $_.Extension -ieq ".exe" })) {
+            throw "No .exe installer found in $distDir"
+          }
+
+          if (-not (Test-Path -LiteralPath (Join-Path $distDir "SHA256SUMS.txt"))) {
+            throw "Missing SHA256SUMS.txt in $distDir"
+          }
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
           name: MuteBack-Windows
-          path: |
-            dist/windows/*.exe
-            dist/windows/SHA256SUMS.txt
+          path: ${{ env.WINDOWS_DIST_DIR }}
           if-no-files-found: error
 
       - name: Publish draft GitHub release
@@ -65,5 +86,5 @@ jobs:
           draft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
-            dist/windows/*.exe
-            dist/windows/SHA256SUMS.txt
+            ${{ env.WINDOWS_DIST_DIR }}/*.exe
+            ${{ env.WINDOWS_DIST_DIR }}/SHA256SUMS.txt

@@ -24,10 +24,27 @@ if (-not $SkipTauriCliInstall) {
 
 Invoke-CheckedCommand cargo tauri build --bundles $Bundles
 
-$candidateBundleDirs = @(
+$knownBundleDirs = @(
     (Get-RepoPath "src-tauri" "target" "release" "bundle" "nsis"),
     (Get-RepoPath "target" "release" "bundle" "nsis")
-) | Select-Object -Unique
+)
+
+$bundleRoots = @(
+    (Get-RepoPath "src-tauri" "target"),
+    (Get-RepoPath "target")
+)
+
+$discoveredBundleDirs = foreach ($bundleRoot in $bundleRoots) {
+    if (Test-Path -LiteralPath $bundleRoot) {
+        Get-ChildItem -LiteralPath $bundleRoot -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "nsis" -and $_.Parent.Name -eq "bundle" } |
+            ForEach-Object { $_.FullName }
+    }
+}
+
+$candidateBundleDirs = @($knownBundleDirs + $discoveredBundleDirs) |
+    Where-Object { $_ } |
+    Select-Object -Unique
 
 $installers = @()
 foreach ($bundleDir in $candidateBundleDirs) {
@@ -65,3 +82,7 @@ $checksumsPath = Join-Path $DistDir "SHA256SUMS.txt"
 [System.IO.File]::WriteAllLines($checksumsPath, $checksums, [System.Text.Encoding]::ASCII)
 Write-Host "Staged Windows package files in $DistDir"
 Write-Host "Wrote $checksumsPath"
+
+Get-ChildItem -LiteralPath $DistDir -File | ForEach-Object {
+    Write-Host " - $($_.FullName)"
+}
