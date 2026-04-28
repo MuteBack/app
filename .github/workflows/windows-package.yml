@@ -48,9 +48,7 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
-        run: |
-          $distDir = Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"
-          ./scripts/package-windows.ps1 -DistDir $distDir
+        run: ./scripts/package-windows.ps1
 
       - name: Validate package files
         shell: pwsh
@@ -58,6 +56,12 @@ jobs:
           $distDir = Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"
 
           if (-not (Test-Path -LiteralPath $distDir)) {
+            Write-Host "Expected package directory was not created: $distDir"
+            Write-Host "Bundle outputs found under target directories:"
+            Get-ChildItem -Path "target", "src-tauri/target" -Recurse -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match "\\bundle\\" } |
+              Select-Object FullName, Length |
+              Format-Table -AutoSize
             throw "Expected package directory was not created: $distDir"
           }
 

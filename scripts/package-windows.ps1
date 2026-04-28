@@ -19,6 +19,14 @@ if (-not $isWindowsPlatform) {
     throw "Windows packaging must run on Windows because the NSIS installer target is Windows-only."
 }
 
+if (-not $DistDir) {
+    $DistDir = Get-RepoPath "dist" "windows"
+} elseif (-not [System.IO.Path]::IsPathRooted($DistDir)) {
+    $DistDir = Get-RepoPath $DistDir
+}
+
+Write-Host "Windows package output directory: $DistDir"
+
 function Test-TauriCliInstalled {
     $previousErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -77,12 +85,6 @@ foreach ($bundleDir in $candidateBundleDirs) {
 if ($installers.Count -eq 0) {
     $searched = $candidateBundleDirs -join ", "
     throw "No Windows installer was produced. Searched: $searched."
-}
-
-if (-not $DistDir) {
-    $DistDir = Get-RepoPath "dist" "windows"
-} elseif (-not [System.IO.Path]::IsPathRooted($DistDir)) {
-    $DistDir = Get-RepoPath $DistDir
 }
 
 New-Item -ItemType Directory -Path $DistDir -Force | Out-Null
