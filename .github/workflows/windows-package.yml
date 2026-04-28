@@ -13,7 +13,6 @@ env:
   CARGO_TERM_COLOR: always
   ORT_PREFER_DYNAMIC_LINK: "1"
   ORT_SKIP_DOWNLOAD: "1"
-  WINDOWS_DIST_DIR: dist/windows
 
 jobs:
   package-windows:
@@ -42,58 +41,57 @@ jobs:
           restore-keys: |
             windows-cargo-
 
-      - name: Install NSIS
-        shell: pwsh
-        run: ./scripts/install-nsis.ps1
-
-      - name: Build NSIS installer
-        id: package
+      - name: Prepare native assets
         shell: pwsh
         run: |
-          $distDir = [System.IO.Path]::GetFullPath((Join-Path "$env:GITHUB_WORKSPACE" "$env:WINDOWS_DIST_DIR"))
-          ./scripts/package-windows.ps1 -DistDir $distDir
-          ./scripts/stage-windows-package.ps1 -DistDir $distDir
-          $distDirForActions = $distDir.Replace("\", "/")
-          "dist-dir=$distDirForActions" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "WINDOWS_DIST_DIR_ABS=$distDirForActions" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          ./scripts/download-assets.ps1
+          . ./scripts/common.ps1
+          Set-MuteBackNativeEnv
 
-      - name: Verify staged package
+          @(
+            "SILERO_MODEL_PATH=$env:SILERO_MODEL_PATH"
+            "SPEAKER_MODEL_PATH=$env:SPEAKER_MODEL_PATH"
+            "ORT_LIB_LOCATION=$env:ORT_LIB_LOCATION"
+            "ORT_DYLIB_PATH=$env:ORT_DYLIB_PATH"
+            "ORT_PREFER_DYNAMIC_LINK=$env:ORT_PREFER_DYNAMIC_LINK"
+            "ORT_SKIP_DOWNLOAD=$env:ORT_SKIP_DOWNLOAD"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          Get-OnnxRuntimeLibDir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Clear stale Tauri bundles
         shell: pwsh
         run: |
-          $distDir = "${{ steps.package.outputs.dist-dir }}"
-          Write-Host "GITHUB_WORKSPACE=$env:GITHUB_WORKSPACE"
-          Write-Host "WINDOWS_DIST_DIR=$env:WINDOWS_DIST_DIR"
-          Write-Host "WINDOWS_DIST_DIR_ABS=$env:WINDOWS_DIST_DIR_ABS"
-          Write-Host "Verifying package directory: $distDir"
+          Remove-Item -LiteralPath "target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
 
-          if (-not (Test-Path -LiteralPath $distDir -PathType Container)) {
-            throw "Expected package directory was not created: $distDir"
-          }
-
-          $files = @(Get-ChildItem -LiteralPath $distDir -File)
-          $files | Format-Table -AutoSize
-
-          if (-not ($files | Where-Object { $_.Extension -ieq ".exe" })) {
-            throw "No .exe installer found in $distDir"
-          }
-
-          if (-not (Test-Path -LiteralPath (Join-Path $distDir "SHA256SUMS.txt") -PathType Leaf)) {
-            throw "Missing SHA256SUMS.txt in $distDir"
-          }
-
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+      - name: Build Windows package artifact
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          name: MuteBack-Windows
-          path: ${{ steps.package.outputs.dist-dir }}/*
-          if-no-files-found: error
+          projectPath: src-tauri
+          args: --bundles nsis
+          retryAttempts: 2
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: MuteBack-Windows-[bundle]
+          uploadUpdaterJson: false
 
       - name: Publish draft GitHub release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          draft: true
+          projectPath: src-tauri
+          args: --bundles nsis
+          retryAttempts: 2
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: MuteBack-Windows-[bundle]
+          uploadUpdaterJson: false
+          tagName: ${{ github.ref_name }}
+          releaseName: MuteBack ${{ github.ref_name }}
+          releaseBody: See the assets to download and install this Windows build.
+          releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: |
-            ${{ steps.package.outputs.dist-dir }}/*.exe
-            ${{ steps.package.outputs.dist-dir }}/SHA256SUMS.txt
