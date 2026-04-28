@@ -191,9 +191,10 @@ mod windows_runtime {
         )?;
         stream.play()?;
 
-        let reference_audio = SharedReferenceAudio::new();
+        let reference_audio_config = initial_config.reference_audio_config();
+        let reference_audio = SharedReferenceAudio::with_config(&reference_audio_config);
         let output_activity = reference_audio.clone();
-        let output_activity_config = ReferenceAudioConfig::default();
+        let output_activity_config = reference_audio_config.clone();
         let reference_stream =
             match build_reference_stream(&host, reference_audio.clone(), error_tx.clone()) {
                 Ok(Some(stream)) => match stream.play() {
@@ -219,10 +220,18 @@ mod windows_runtime {
                 }
             };
 
-        let silero = SileroVadEngine::new(detector_sample_rate)
-            .map_err(|error| RuntimeError::new(format!("failed to start Silero VAD: {error}")))?;
-        let near_field = NearFieldVad::new(silero, Duration::from_millis(32));
-        let reference_rejecting = ReferenceRejectingVad::new(near_field, reference_audio);
+        let silero =
+            SileroVadEngine::with_config(detector_sample_rate, initial_config.silero_vad_config())
+                .map_err(|error| {
+                    RuntimeError::new(format!("failed to start Silero VAD: {error}"))
+                })?;
+        let near_field = NearFieldVad::with_config(
+            silero,
+            Duration::from_millis(32),
+            initial_config.near_field_gate_config(),
+        );
+        let reference_rejecting =
+            ReferenceRejectingVad::with_config(near_field, reference_audio, reference_audio_config);
         let speaker_engine = match OnnxSpeakerEmbeddingEngine::new() {
             Ok(engine) => Some(engine),
             Err(error) => {

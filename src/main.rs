@@ -27,6 +27,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         config.normalized_ducking_level() * 100.0
     );
     println!(
+        "Voice pickup sensitivity: {:.0}%",
+        config.normalized_voice_detection_sensitivity() * 100.0
+    );
+    println!(
         "Transition: {}",
         if config.smooth_ducking {
             format!(
@@ -38,6 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "instant".to_string()
         }
     );
+    println!("Restore delay: {} ms", config.restore_delay().as_millis());
     println!(
         "Restore mode: {}",
         if config.manual_restore {
@@ -97,8 +102,10 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  --duck-level <0-100>       Background volume while speaking. Default: 10");
+    println!("  --sensitivity <0-100>      Voice pickup sensitivity. Default: 65");
     println!("  --transition <mode>        smooth or instant. Default: smooth");
     println!("  --restore-mode <mode>      automatic or manual. Default: automatic");
+    println!("  --restore-delay-ms <ms>    Delay after speech stops. Default: 2120");
     println!("  --duck-fade-ms <ms>        Smooth fade-down duration. Default: 180");
     println!("  --restore-fade-ms <ms>     Smooth restore duration. Default: 260");
 }

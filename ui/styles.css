@@ -367,6 +367,27 @@ h3 {
   min-height: 42px;
 }
 
+.restore-delay-card .setting-row {
+  min-height: 42px;
+}
+
+.sensitivity-card {
+  gap: 9px;
+}
+
+.sensitivity-scale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #96928e;
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.sensitivity-scale span {
+  min-width: 0;
+}
+
 .input-card {
   min-height: 47px;
   color: #151512;
@@ -458,6 +479,11 @@ h3 {
 
 .timing-grid[data-disabled="true"] {
   opacity: 0.44;
+}
+
+.compact-number {
+  width: 94px;
+  flex: 0 0 auto;
 }
 
 label {

@@ -51,12 +51,14 @@ enum TransitionMode {
 struct Settings {
     enabled: bool,
     duck_level_percent: u8,
+    voice_detection_sensitivity: u8,
     transition: TransitionMode,
     manual_restore: bool,
     voice_match_enabled: bool,
     microphone_id: Option<String>,
     duck_fade_ms: u64,
     restore_fade_ms: u64,
+    restore_delay_ms: u64,
 }
 
 impl Default for Settings {
@@ -66,6 +68,8 @@ impl Default for Settings {
         Self {
             enabled: true,
             duck_level_percent: (config.normalized_ducking_level() * 100.0).round() as u8,
+            voice_detection_sensitivity: (config.normalized_voice_detection_sensitivity() * 100.0)
+                .round() as u8,
             transition: if config.smooth_ducking {
                 TransitionMode::Smooth
             } else {
@@ -76,6 +80,7 @@ impl Default for Settings {
             microphone_id: None,
             duck_fade_ms: config.duck_fade.as_millis() as u64,
             restore_fade_ms: config.restore_fade.as_millis() as u64,
+            restore_delay_ms: config.restore_delay().as_millis() as u64,
         }
     }
 }
@@ -308,7 +313,8 @@ fn update_settings(
             .settings
             .lock()
             .map_err(|_| "settings state is unavailable".to_string())?;
-        let restart_runtime = settings.microphone_id != input.microphone_id;
+        let restart_runtime = settings.microphone_id != input.microphone_id
+            || settings.voice_detection_sensitivity != input.voice_detection_sensitivity;
         *settings = input.clone();
         restart_runtime
     };
@@ -589,6 +595,14 @@ async fn check_for_updates_inner(app: AppHandle, install_update: bool) -> Update
 fn validate_settings(settings: &Settings) -> Result<(), String> {
     if settings.duck_level_percent > 100 {
         return Err("ducking level must be between 0 and 100".to_string());
+    }
+
+    if settings.voice_detection_sensitivity > 100 {
+        return Err("voice pickup sensitivity must be between 0 and 100".to_string());
+    }
+
+    if settings.restore_delay_ms > 10_000 {
+        return Err("restore delay must be between 0 and 10000 ms".to_string());
     }
 
     Ok(())
@@ -895,6 +909,7 @@ fn watch_runtime_events(
 fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig {
     let mut config = AppConfig::default();
     config.ducking_level = settings.duck_level_percent as f32 / 100.0;
+    config.voice_detection_sensitivity = settings.voice_detection_sensitivity as f32 / 100.0;
     config.smooth_ducking = settings.transition == TransitionMode::Smooth;
     config.manual_restore = settings.manual_restore;
     config.voice_match_enabled = settings.voice_match_enabled;
@@ -910,6 +925,7 @@ fn app_config_from_settings(settings: &Settings, state: &AppState) -> AppConfig 
     };
     config.duck_fade = std::time::Duration::from_millis(settings.duck_fade_ms);
     config.restore_fade = std::time::Duration::from_millis(settings.restore_fade_ms);
+    config.set_restore_delay(std::time::Duration::from_millis(settings.restore_delay_ms));
     config
 }
 

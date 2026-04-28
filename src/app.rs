@@ -117,8 +117,7 @@ mod tests {
     use crate::ducking::{AppliedDucking, NoopDucker};
     use crate::session::SessionAction;
     use crate::vad::{
-        NearFieldVad, ReferenceAudioConfig, ReferenceRejectingVad, SharedReferenceAudio,
-        VadDecision, VadEngine,
+        NearFieldVad, ReferenceRejectingVad, SharedReferenceAudio, VadDecision, VadEngine,
     };
 
     struct SequenceVad {
@@ -180,12 +179,18 @@ mod tests {
         let frame_duration = Duration::from_millis(32);
         let calibration_frames = 24;
         let total_frames = calibration_frames + scenario.frames;
-        let reference = SharedReferenceAudio::new();
-        let reference_config = ReferenceAudioConfig::default();
+        let config = AppConfig::default();
+        let reference_config = config.reference_audio_config();
+        let reference = SharedReferenceAudio::with_config(&reference_config);
         let inner = SequenceVad::new(vec![VadDecision::Speech; total_frames]);
-        let near_field = NearFieldVad::new(inner, frame_duration);
-        let vad = ReferenceRejectingVad::new(near_field, reference.clone());
-        let mut app = MuteBackApp::new(AppConfig::default(), vad, NoopDucker::default());
+        let near_field =
+            NearFieldVad::with_config(inner, frame_duration, config.near_field_gate_config());
+        let vad = ReferenceRejectingVad::with_config(
+            near_field,
+            reference.clone(),
+            reference_config.clone(),
+        );
+        let mut app = MuteBackApp::new(config, vad, NoopDucker::default());
         let tick = AudioTick {
             elapsed: frame_duration,
             hotkey_pressed: false,
@@ -344,6 +349,23 @@ mod tests {
             bleed_ratio: 0.22,
             speech_start_frame: Some(40),
             speech_rms: 0.090,
+        });
+
+        assert_eq!(report.duck_actions, 1, "{report:?}");
+        assert!(
+            report.first_duck_after_speech_start <= Some(Duration::from_millis(260)),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn quality_ducks_for_quieter_speech_over_music_by_default() {
+        let report = measure_playback_ducking_quality(PlaybackScenario {
+            frames: 120,
+            reference_rms: 0.22,
+            bleed_ratio: 0.22,
+            speech_start_frame: Some(40),
+            speech_rms: 0.040,
         });
 
         assert_eq!(report.duck_actions, 1, "{report:?}");

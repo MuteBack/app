@@ -52,6 +52,32 @@
             </div>
 
             <div class="settings-section">
+              <p class="section-label">Detection</p>
+              <section class="settings-card sensitivity-card">
+                <div class="quick-row">
+                  <div>
+                    <h3>Voice Pickup</h3>
+                    <p>Quieter or farther speech</p>
+                  </div>
+                  <output class="meter-value" id="voice-sensitivity-value">65%</output>
+                </div>
+                <input
+                  id="voice-sensitivity"
+                  class="range"
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="1"
+                />
+                <div class="sensitivity-scale" aria-hidden="true">
+                  <span>Strict</span>
+                  <span>Balanced</span>
+                  <span>Sensitive</span>
+                </div>
+              </section>
+            </div>
+
+            <div class="settings-section">
               <p class="section-label">Manual Restore</p>
               <section class="settings-card manual-restore-card">
                 <label class="toggle-row">
@@ -61,6 +87,22 @@
                   </span>
                   <input id="manual-restore" type="checkbox" />
                 </label>
+              </section>
+            </div>
+
+            <div class="settings-section">
+              <p class="section-label">Restore</p>
+              <section class="settings-card restore-delay-card">
+                <div class="setting-row">
+                  <div>
+                    <h3>Restore Delay</h3>
+                    <p>After speech stops</p>
+                  </div>
+                  <label class="compact-number">
+                    <span>Delay</span>
+                    <input id="restore-delay-ms" type="number" min="0" max="10000" step="100" />
+                  </label>
+                </div>
               </section>
             </div>
 

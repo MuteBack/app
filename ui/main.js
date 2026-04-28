@@ -10,6 +10,8 @@ const controls = {
   statusText: document.querySelector("#status-text"),
   level: document.querySelector("#duck-level"),
   levelValue: document.querySelector("#duck-level-value"),
+  voiceSensitivity: document.querySelector("#voice-sensitivity"),
+  voiceSensitivityValue: document.querySelector("#voice-sensitivity-value"),
   restoreModeLabel: document.querySelector("#restore-mode-label"),
   voiceMatchLabel: document.querySelector("#voice-match-label"),
   microphoneLabel: document.querySelector("#microphone-label"),
@@ -25,6 +27,7 @@ const controls = {
   voiceProgress: document.querySelector("#voice-progress"),
   duckFade: document.querySelector("#duck-fade-ms"),
   restoreFade: document.querySelector("#restore-fade-ms"),
+  restoreDelay: document.querySelector("#restore-delay-ms"),
   timingGrid: document.querySelector("#timing-grid"),
   previewFill: document.querySelector("#preview-fill"),
   saveStatus: document.querySelector("#save-status"),
@@ -63,14 +66,19 @@ let microphones = await invoke("list_microphones");
 let isRecording = false;
 let activeSamplePlayback = null;
 let runtimeStatus = await invoke("get_runtime_status");
+let sensitivitySaveTimer = null;
 
 function render() {
   const microphoneName = selectedMicrophoneName();
+  const voiceDetectionSensitivity = settings.voiceDetectionSensitivity ?? 65;
   controls.appEnabled.checked = settings.enabled;
   controls.level.value = settings.duckLevelPercent;
   controls.levelValue.value = `${settings.duckLevelPercent}%`;
+  controls.voiceSensitivity.value = voiceDetectionSensitivity;
+  renderSensitivityValue(voiceDetectionSensitivity);
   controls.duckFade.value = settings.duckFadeMs;
   controls.restoreFade.value = settings.restoreFadeMs;
+  controls.restoreDelay.value = settings.restoreDelayMs;
   controls.manualRestore.checked = settings.manualRestore;
   controls.restoreModeLabel.textContent = settings.manualRestore ? "Manual" : "Automatic";
   if (controls.voiceMatchEnabled) {
@@ -94,6 +102,10 @@ function render() {
   renderRuntime();
   renderMicrophones();
   renderEnrollment();
+}
+
+function renderSensitivityValue(value) {
+  controls.voiceSensitivityValue.value = `${value}%`;
 }
 
 async function save(nextSettings) {
@@ -196,12 +208,14 @@ function settingsFromControls(overrides = {}) {
   return {
     enabled: controls.appEnabled.checked,
     duckLevelPercent: Number(controls.level.value),
+    voiceDetectionSensitivity: Number(controls.voiceSensitivity.value),
     transition: settings.transition,
     manualRestore: controls.manualRestore.checked,
     voiceMatchEnabled: false,
     microphoneId: controls.microphoneSelect.value || null,
     duckFadeMs: Number(controls.duckFade.value),
     restoreFadeMs: Number(controls.restoreFade.value),
+    restoreDelayMs: Number(controls.restoreDelay.value),
     ...overrides,
   };
 }
@@ -568,11 +582,28 @@ addListener(controls.level, "input", () => {
   save(settingsFromControls());
 });
 
+addListener(controls.voiceSensitivity, "input", () => {
+  renderSensitivityValue(Number(controls.voiceSensitivity.value));
+  clearTimeout(sensitivitySaveTimer);
+  sensitivitySaveTimer = setTimeout(() => {
+    save(settingsFromControls());
+  }, 450);
+});
+
+addListener(controls.voiceSensitivity, "change", () => {
+  clearTimeout(sensitivitySaveTimer);
+  save(settingsFromControls());
+});
+
 addListener(controls.duckFade, "change", () => {
   save(settingsFromControls());
 });
 
 addListener(controls.restoreFade, "change", () => {
+  save(settingsFromControls());
+});
+
+addListener(controls.restoreDelay, "change", () => {
   save(settingsFromControls());
 });
 

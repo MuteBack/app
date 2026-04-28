@@ -66,7 +66,12 @@ impl SessionController {
     }
 
     pub fn set_config(&mut self, config: AppConfig) {
+        let previous_hold_timeout = self.config.hold_timeout;
         self.config = config;
+
+        if self.state == SessionState::Hold && self.active_hold_timeout == previous_hold_timeout {
+            self.active_hold_timeout = self.config.hold_timeout;
+        }
     }
 
     pub fn update(&mut self, input: SessionInput) -> SessionUpdate {
@@ -284,6 +289,42 @@ mod tests {
         let update = controller.update(input(5_000, VadDecision::Silence));
         assert_eq!(update.action, Some(SessionAction::Restore));
         assert_eq!(update.state, SessionState::Idle);
+    }
+
+    #[test]
+    fn custom_restore_delay_controls_silence_before_restore() {
+        let mut config = AppConfig::default();
+        config.set_restore_delay(Duration::from_millis(700));
+        let mut controller = SessionController::new(config);
+
+        controller.update(input(300, VadDecision::Speech));
+        controller.update(input(320, VadDecision::Silence));
+        let update = controller.update(input(379, VadDecision::Silence));
+
+        assert_eq!(update.action, None);
+
+        let update = controller.update(input(1, VadDecision::Silence));
+
+        assert_eq!(update.action, Some(SessionAction::Restore));
+    }
+
+    #[test]
+    fn updating_restore_delay_applies_to_active_hold() {
+        let mut controller = SessionController::new(AppConfig::default());
+        controller.update(input(300, VadDecision::Speech));
+        controller.update(input(320, VadDecision::Silence));
+
+        let mut config = AppConfig::default();
+        config.set_restore_delay(Duration::from_millis(600));
+        controller.set_config(config);
+
+        let update = controller.update(input(279, VadDecision::Silence));
+
+        assert_eq!(update.action, None);
+
+        let update = controller.update(input(1, VadDecision::Silence));
+
+        assert_eq!(update.action, Some(SessionAction::Restore));
     }
 
     #[test]
