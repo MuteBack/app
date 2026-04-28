@@ -134,6 +134,13 @@ mod windows_runtime {
                 let _ = join.join();
             }
         }
+
+        pub fn is_finished(&self) -> bool {
+            self.join
+                .as_ref()
+                .map(|join| join.is_finished())
+                .unwrap_or(true)
+        }
     }
 
     impl Drop for RuntimeHandle {

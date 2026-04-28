@@ -30,6 +30,8 @@ const RESTORE_WINDOW_LABEL: &str = "restore_prompt";
 const RESTORE_WINDOW_SIZE: (f64, f64) = (216.0, 52.0);
 const MAIN_RESIZE_STEPS: u32 = 14;
 const MAIN_RESIZE_FRAME_MS: u64 = 12;
+const RUNTIME_RESTART_DELAY_MS: u64 = 900;
+const RUNTIME_RESTART_LIMIT: u8 = 3;
 const SETTINGS_STORE_PATH: &str = "settings.store.json";
 const SETTINGS_STORE_KEY: &str = "settings";
 const SILERO_RESOURCE_PATH: &str = "assets/vendor/silero_vad.onnx";
@@ -279,6 +281,7 @@ struct AppState {
     voice_enrollment: Mutex<VoiceEnrollment>,
     runtime: Mutex<Option<RuntimeHandle>>,
     runtime_status: Arc<Mutex<RuntimeStatus>>,
+    runtime_restart_attempts: Mutex<u8>,
 }
 
 #[tauri::command]
@@ -601,6 +604,7 @@ fn sync_runtime(
         start_or_update_runtime(settings, state, app)
     } else {
         stop_runtime(state);
+        reset_runtime_restart_attempts(state);
         set_runtime_status(state, |status| {
             status.enabled = false;
             status.running = false;
@@ -668,6 +672,108 @@ fn stop_runtime(state: &AppState) {
     }
 }
 
+fn clear_finished_runtime(state: &AppState) {
+    let mut runtime = match state.runtime.lock() {
+        Ok(runtime) => runtime,
+        Err(_) => return,
+    };
+
+    let finished = runtime
+        .as_ref()
+        .map(|runtime| runtime.is_finished())
+        .unwrap_or(false);
+
+    if finished {
+        if let Some(mut runtime) = runtime.take() {
+            runtime.stop();
+        }
+    }
+}
+
+fn reset_runtime_restart_attempts(state: &AppState) {
+    if let Ok(mut attempts) = state.runtime_restart_attempts.lock() {
+        *attempts = 0;
+    }
+}
+
+fn schedule_runtime_restart(app: AppHandle) {
+    let state = app.state::<AppState>();
+    let enabled = state
+        .settings
+        .lock()
+        .map(|settings| settings.enabled)
+        .unwrap_or(false);
+
+    if !enabled {
+        return;
+    }
+
+    let attempt = {
+        let mut attempts = match state.runtime_restart_attempts.lock() {
+            Ok(attempts) => attempts,
+            Err(_) => return,
+        };
+
+        if *attempts >= RUNTIME_RESTART_LIMIT {
+            return;
+        }
+
+        *attempts += 1;
+        *attempts
+    };
+
+    set_runtime_status(&state, |status| {
+        status.enabled = true;
+        status.running = false;
+        status.ducked = false;
+        status.message = format!(
+            "Restarting audio ({attempt}/{RUNTIME_RESTART_LIMIT})"
+        );
+        status.microphone = None;
+    });
+    let _ = update_tray_icon(&app, &state);
+
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(
+            RUNTIME_RESTART_DELAY_MS * u64::from(attempt),
+        ));
+
+        let state = app.state::<AppState>();
+        let settings = match state.settings.lock() {
+            Ok(settings) => settings.clone(),
+            Err(_) => return,
+        };
+
+        if !settings.enabled {
+            return;
+        }
+
+        clear_finished_runtime(&state);
+
+        let runtime_active = state
+            .runtime
+            .lock()
+            .map(|runtime| runtime.is_some())
+            .unwrap_or(true);
+
+        if runtime_active {
+            return;
+        }
+
+        if let Err(error) = sync_runtime(&settings, &state, &app, false) {
+            set_runtime_status(&state, |status| {
+                status.enabled = true;
+                status.running = false;
+                status.ducked = false;
+                status.message = error;
+                status.microphone = None;
+            });
+            let _ = update_tray_icon(&app, &state);
+            schedule_runtime_restart(app);
+        }
+    });
+}
+
 fn watch_runtime_events(
     app: AppHandle,
     settings: Arc<Mutex<Settings>>,
@@ -686,6 +792,7 @@ fn watch_runtime_events(
 
                 match event {
                     RuntimeEvent::Started(info) => {
+                        reset_runtime_restart_attempts(&app.state::<AppState>());
                         status.running = true;
                         status.ducked = false;
                         status.message = "Listening".to_string();
@@ -725,6 +832,9 @@ fn watch_runtime_events(
             let _ = update_restore_prompt_from_shared(&app, &settings, &runtime_status);
 
             if stopped {
+                let state = app.state::<AppState>();
+                clear_finished_runtime(&state);
+                schedule_runtime_restart(app.clone());
                 break;
             }
         }
@@ -1343,6 +1453,7 @@ fn main() {
             voice_enrollment: Mutex::new(VoiceEnrollment::default()),
             runtime: Mutex::new(None),
             runtime_status: Arc::new(Mutex::new(RuntimeStatus::default())),
+            runtime_restart_attempts: Mutex::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,

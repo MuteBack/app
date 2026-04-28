@@ -80,10 +80,8 @@ jobs:
           projectPath: src-tauri
           args: --bundles nsis
           retryAttempts: 2
-          uploadWorkflowArtifacts: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          workflowArtifactNamePattern: MuteBack_x64
-          releaseAssetNamePattern: MuteBack_x64[ext]
-          uploadUpdaterJson: false
+          assetNamePattern: MuteBack_x64[ext]
+          includeUpdaterJson: false
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: ${{ startsWith(github.ref, 'refs/tags/') && format('MuteBack {0}', github.ref_name) || '' }}
           releaseBody: ${{ startsWith(github.ref, 'refs/tags/') && 'See the assets to download and install this Windows build.' || '' }}
